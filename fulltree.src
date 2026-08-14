@@ -1,0 +1,326 @@
+//Made By Hobo
+// compiled command: tree
+// Full-device, terminal-native filesystem tree for Grey Hack / GreyScript.
+//
+// Default scan root: /
+// Usage: tree [path] [--page lines]
+//
+// This program is read-only: it does not create a report or modify the device.
+
+command_name = "tree"
+if typeof(program_path) == "string" then
+    command_parts = program_path.split("/")
+    if command_parts.len > 0 then
+        detected_name = command_parts[-1]
+        if detected_name != "" then command_name = detected_name
+    end if
+end if
+
+show_help = function
+    print("Usage: " + command_name + " [path] [--page lines]")
+    print("       " + command_name + " help | -help | --help | -h")
+    print("")
+    print("Print a detailed, sorted filesystem tree directly in the terminal.")
+    print("If path is omitted, the scan starts at /.")
+    print("--page N pauses before each additional N output lines.")
+    print("Symlinks are shown once and are never followed when the API exposes them.")
+    print("")
+    print("Examples:")
+    print("  " + command_name)
+    print("  " + command_name + " /bin")
+    print("  " + command_name + " /bin --page 30")
+end function
+
+usage_error = function(message)
+    exit(command_name + ": " + message + char(10) + "Usage: " + command_name + " [path] [--page lines]")
+end function
+
+args = params
+if args == null then args = []
+
+scan_path = "/"
+path_was_set = 0
+page_size = 0
+
+i = 0
+while i < args.len
+    arg = args[i]
+
+    if arg == "help" or arg == "-help" or arg == "--help" or arg == "-h" then
+        show_help
+        exit
+    else if arg == "-p" or arg == "--page" then
+        if i + 1 >= args.len then usage_error("missing line count after " + arg)
+        page_value = args[i + 1].to_int
+        if typeof(page_value) != "number" or page_value < 1 then
+            usage_error("page size must be a positive whole number")
+        end if
+        page_size = floor(page_value)
+        i = i + 1
+    else if arg.len > 0 and arg[0] == "-" then
+        usage_error("unknown option: " + arg)
+    else
+        if path_was_set == 1 then usage_error("only one path may be supplied")
+        scan_path = arg
+        path_was_set = 1
+    end if
+
+    i = i + 1
+end while
+
+shell = get_shell
+if shell == null then exit(command_name + ": no active shell")
+
+computer = shell.host_computer
+if computer == null then exit(command_name + ": no host computer")
+
+root = computer.File(scan_path)
+if root == null then exit(command_name + ": no such file or directory: " + scan_path)
+
+// Keep colors close to the original tree utility.
+dir_color = "<color=#2390B2FF>"
+binary_color = "<color=#D1304FFF>"
+link_color = "<color=#D7AF5FFF>"
+error_color = "<color=#FF5F5FFF>"
+dim_color = "<color=#87919BFF>"
+reset_color = "</color>"
+
+display_value = function(value)
+    if value == null then return "<unavailable>"
+    return str(value)
+end function
+
+pager = {"lines": 0}
+emit = function(line)
+    if page_size > 0 and pager["lines"] >= page_size then
+        user_input(dim_color + "-- more: press Enter --" + reset_color)
+        pager["lines"] = 0
+    end if
+    print(line)
+    pager["lines"] = pager["lines"] + 1
+end function
+
+started = current_date
+resolved_root = root.path
+if resolved_root == null then resolved_root = scan_path
+
+print("Full filesystem tree")
+print("Host: " + display_value(computer.get_name) + " | User: " + active_user)
+print("Root: " + resolved_root + " | Started: " + started)
+print(dim_color + "Each item: name [TYPE] path=... perms=... owner=... group=... size=... binary=... target=..." + reset_color)
+print("")
+
+// Each stack frame contains all layout state needed to print one item.
+// This is depth-first traversal without recursive function calls.
+pending = [{"node": root, "prefix": "", "last": 1, "root": 1}]
+seen_paths = {}
+
+directory_count = 0
+file_count = 0
+binary_count = 0
+link_count = 0
+unknown_count = 0
+issue_count = 0
+
+symlink_api_available = 0
+if root.hasIndex("is_symlink") then symlink_api_available = 1
+
+while pending.len > 0
+    frame = pending.pop
+    node = frame["node"]
+    prefix = frame["prefix"]
+    is_last = frame["last"]
+    is_root = frame["root"]
+
+    node_path = node.path
+    display_path = display_value(node_path)
+
+    branch = ""
+    if is_root == 0 then branch = "|--"
+
+    // Defend against duplicate API results and cycles while retaining one row.
+    if node_path != null and seen_paths.hasIndex(node_path) then
+        issue_count = issue_count + 1
+        emit(prefix + branch + error_color + "! duplicate path skipped: " + display_path + reset_color)
+        continue
+    end if
+    if node_path != null then seen_paths[node_path] = 1
+
+    folder_state = node.is_folder
+    link_supported = node.hasIndex("is_symlink")
+    link_state = 0
+    if link_supported then link_state = node.is_symlink
+
+    state_invalid = 0
+    if folder_state == null then state_invalid = 1
+    if link_supported and link_state == null then state_invalid = 1
+
+    is_folder = folder_state == 1
+    is_link = link_supported and link_state == 1
+
+    permissions_value = node.permissions
+    owner_value = node.owner
+    group_value = node.group
+    size_value = node.size
+
+    binary_state = null
+    if not is_folder or is_link then binary_state = node.is_binary
+
+    kind = "FILE"
+    type_color = ""
+    name_color = ""
+
+    if state_invalid == 1 then
+        kind = "UNKNOWN"
+        type_color = error_color
+        name_color = error_color
+        unknown_count = unknown_count + 1
+    else if is_link then
+        kind = "LINK"
+        type_color = link_color
+        name_color = link_color
+        link_count = link_count + 1
+    else if is_folder then
+        kind = "DIR"
+        type_color = dir_color
+        name_color = dir_color
+        directory_count = directory_count + 1
+    else if binary_state == 1 then
+        kind = "BINARY"
+        type_color = binary_color
+        name_color = binary_color
+        file_count = file_count + 1
+        binary_count = binary_count + 1
+    else
+        file_count = file_count + 1
+    end if
+
+    node_name = node.name
+    if node_name == null or node_name == "" then node_name = display_path
+
+    binary_text = "-"
+    if not is_folder or is_link then
+        if binary_state == 1 then
+            binary_text = "yes"
+        else if binary_state == 0 then
+            binary_text = "no"
+        else
+            binary_text = "<unavailable>"
+        end if
+    end if
+
+    target_text = ""
+    if is_link then
+        // path(1) is only called when the file object exposes symlink support.
+        target_text = " target=" + display_value(node.path(1))
+    end if
+
+    styled_name = node_name
+    if name_color != "" then styled_name = name_color + node_name + reset_color
+
+    styled_type = "[" + kind + "]"
+    if type_color != "" then styled_type = type_color + styled_type + reset_color
+    details = " path=" + display_path
+    details = details + " perms=" + display_value(permissions_value)
+    details = details + " owner=" + display_value(owner_value)
+    details = details + " group=" + display_value(group_value)
+    details = details + " size=" + display_value(size_value)
+    details = details + " binary=" + binary_text + target_text
+
+    emit(prefix + branch + styled_name + " " + styled_type + dim_color + details + reset_color)
+
+    if state_invalid == 1 then
+        issue_count = issue_count + 1
+        emit(prefix + "   " + error_color + "! item became invalid during traversal: " + display_path + reset_color)
+        continue
+    end if
+
+    metadata_missing = permissions_value == null or owner_value == null
+    metadata_missing = metadata_missing or group_value == null or size_value == null
+    if (not is_folder or is_link) and binary_state == null then metadata_missing = 1
+    if metadata_missing then
+        issue_count = issue_count + 1
+        emit(prefix + "   " + error_color + "! some metadata was unavailable: " + display_path + reset_color)
+    end if
+
+    // A symlink is a displayed item, never a traversal edge.
+    if is_folder and not is_link then
+        // Attempt enumeration directly. The actual getter results, rather than
+        // displayed mode bits, determine whether this shell could list it.
+        child_folders = node.get_folders
+        child_files = node.get_files
+        children = []
+
+        if typeof(child_folders) == "list" then
+            for child in child_folders
+                child_name = child.name
+                if child_name == null then child_name = child.path
+                children.push({"name": display_value(child_name), "node": child})
+            end for
+        else
+            issue_count = issue_count + 1
+            emit(prefix + "   " + error_color + "! get_folders failed for " + display_path + " (returned " + typeof(child_folders) + ")" + reset_color)
+        end if
+
+        if typeof(child_files) == "list" then
+            for child in child_files
+                child_name = child.name
+                if child_name == null then child_name = child.path
+                children.push({"name": display_value(child_name), "node": child})
+            end for
+        else
+            issue_count = issue_count + 1
+            emit(prefix + "   " + error_color + "! get_files failed for " + display_path + " (returned " + typeof(child_files) + ")" + reset_color)
+        end if
+
+        // Sorting is local to each directory. Reverse push preserves ascending
+        // display order because pending is a last-in, first-out stack.
+        children.sort("name")
+
+        child_prefix = prefix
+        if is_root == 0 then
+            if is_last then
+                child_prefix = child_prefix + "   "
+            else
+                child_prefix = child_prefix + "|  "
+            end if
+        end if
+
+        child_index = children.len - 1
+        while child_index >= 0
+            child_is_last = child_index == children.len - 1
+            pending.push({
+                "node": children[child_index]["node"],
+                "prefix": child_prefix,
+                "last": child_is_last,
+                "root": 0
+            })
+            child_index = child_index - 1
+        end while
+    end if
+end while
+
+finished = current_date
+item_count = directory_count + file_count + link_count + unknown_count
+
+print("")
+print("Filesystem scan complete.")
+print("Items: " + item_count + " | Directories: " + directory_count + " | Files: " + file_count + " | Symlinks: " + link_count)
+print("Binaries: " + binary_count + " | Unknown items: " + unknown_count + " | Enumeration/metadata issues: " + issue_count)
+print("Started: " + started + " | Finished: " + finished)
+
+if active_user != "root" then
+    print(link_color + "WARNING: not running as root; inaccessible items may be absent." + reset_color)
+end if
+
+if symlink_api_available == 0 then
+    print(link_color + "WARNING: this runtime does not expose is_symlink; symlink classification cannot be guaranteed." + reset_color)
+end if
+
+if issue_count > 0 then
+    print(error_color + "RESULT INCOMPLETE: the red ! lines identify every observed problem." + reset_color)
+else if active_user == "root" and symlink_api_available == 1 then
+    print("Every filesystem item visible during traversal was printed exactly once.")
+else
+    print("Every filesystem item visible to this shell during traversal was printed exactly once.")
+end if
