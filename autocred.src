@@ -1,0 +1,937 @@
+//Made By Hobo
+// AutoCred compatibility rewrite
+// Targets Grey Hack Public v0.9.6773 and Nightly v0.9.7052.
+//
+// This handles the classic "Mission Contract" credential jobs. The newer
+// procedural Fraud/Sabotage/Corporate Espionage missions are multi-stage and
+// intentionally are not treated as credential contracts here.
+//
+// Usage:
+//   autocred [mail_limit] [clear_logs]
+//   autocred 25 1
+//
+// mail_limit: maximum credential-contract emails to list (default 100)
+// clear_logs: 1 attempts a bounded /var/system.log replacement after success;
+//             0 leaves it alone (default)
+
+SCRIPT_VERSION = "2.0.2"
+
+// Empty mail fields are prompted at runtime; an empty PIN disables the PIN
+// check. Keeping secrets out of source is recommended. Password/PIN prompts
+// use user_input(..., 1) so their input is masked.
+MAIL_USER = ""
+MAIL_PASSWORD = ""
+PIN = ""
+
+DEFAULT_MAIL_LIMIT = 100
+DEFAULT_CLEAR_LOGS = 0
+
+
+is_shell_type = function(kind)
+    // overflow documents full shell/computer/file return objects. Partial and
+    // FTP variants expose different members, so do not call full-object APIs on
+    // them without an exploit-specific adapter.
+    return kind == "shell"
+end function
+
+
+is_computer_type = function(kind)
+    return kind == "computer"
+end function
+
+
+is_file_type = function(kind)
+    return kind == "file"
+end function
+
+
+is_router_type = function(kind)
+    return kind == "router"
+end function
+
+
+is_exploit_object = function(value)
+    kind = typeof(value)
+    if is_shell_type(kind) then return true
+    if is_computer_type(kind) then return true
+    if is_file_type(kind) then return true
+    return false
+end function
+
+
+join_path = function(folder, name)
+    if folder == "/" then return "/" + name
+    if folder[-1] == "/" then return folder + name
+    return folder + "/" + name
+end function
+
+
+show_usage = function()
+    binary_name = program_path.split("/")[-1]
+    return "Usage: " + binary_name + " [mail_limit] [clear_logs: 0|1]" + char(10) +
+        "Example: " + binary_name + " 25 0"
+end function
+
+
+root_file = function(value)
+    kind = typeof(value)
+
+    if is_shell_type(kind) then
+        computer = value.host_computer
+        if not computer then return null
+        return computer.File("/")
+    end if
+
+    if is_computer_type(kind) then
+        return value.File("/")
+    end if
+
+    if is_file_type(kind) then
+        node = value
+        while node.parent
+            node = node.parent
+        end while
+        return node
+    end if
+
+    return null
+end function
+
+
+computer_from_value = function(value)
+    kind = typeof(value)
+    if is_shell_type(kind) then return value.host_computer
+    if is_computer_type(kind) then return value
+    return null
+end function
+
+
+// Resolve an absolute path without an unbounded loop. This also works when an
+// exploit returns a file object rather than a computer or shell.
+resolve_from_root = function(root, path)
+    if not is_file_type(typeof(root)) then return null
+    if path == "/" then return root
+    if path == "" then return null
+    if path[0] != "/" then return null
+
+    node = root
+    for part in path.split("/")
+        if part == "" then continue
+        if not node.is_folder then return null
+
+        children = []
+        folders = node.get_folders
+        files = node.get_files
+        if typeof(folders) == "list" then children = children + folders
+        if typeof(files) == "list" then children = children + files
+
+        next_node = null
+        for child in children
+            if child.name == part then
+                next_node = child
+                break
+            end if
+        end for
+
+        if not next_node then return null
+        node = next_node
+    end for
+
+    return node
+end function
+
+
+has_rwx = function(file_object)
+    if not is_file_type(typeof(file_object)) then return false
+    if not file_object.has_permission("r") then return false
+    if not file_object.has_permission("w") then return false
+    return file_object.has_permission("x")
+end function
+
+
+access_level = function(value)
+    root = root_file(value)
+    if not root then return null
+
+    root_home = resolve_from_root(root, "/root")
+    if root_home then
+        if has_rwx(root_home) then return "root"
+    end if
+
+    home = resolve_from_root(root, "/home")
+    if not home then return "guest"
+
+    folders = home.get_folders
+    if typeof(folders) != "list" then return "guest"
+    for folder in folders
+        if folder.name == "guest" then continue
+        if has_rwx(folder) then return "user"
+    end for
+
+    return "guest"
+end function
+
+
+sort_exploit_objects = function(objects)
+    root_objects = []
+    user_objects = []
+    guest_objects = []
+
+    for object in objects
+        if not is_exploit_object(object) then continue
+        level = access_level(object)
+        if level == "root" then
+            root_objects.push(object)
+        else if level == "user" then
+            user_objects.push(object)
+        else
+            guest_objects.push(object)
+        end if
+    end for
+
+    return root_objects + user_objects + guest_objects
+end function
+
+
+is_target_host = function(value)
+    root = root_file(value)
+    if not root then return false
+    // Router exploit results contain kernel_router.so; credential targets do not.
+    return not resolve_from_root(root, "/lib/kernel_router.so")
+end function
+
+
+clear_system_log = function(value)
+    // system.log is special and cannot be reliably emptied with set_content.
+    // Keep the legacy replacement technique tightly scoped to one temporary
+    // file instead of recursively changing ownership or permissions.
+    computer = computer_from_value(value)
+    if not computer then return false
+
+    temp_name = "autocred.tmp"
+    temp_path = "/var/" + temp_name
+    if computer.File(temp_path) then return false
+
+    created = computer.touch("/var", temp_name)
+    if created != 1 then return false
+
+    temp_file = computer.File(temp_path)
+    log_file = computer.File("/var/system.log")
+    if not temp_file then return false
+    if not log_file then
+        temp_file.delete
+        return false
+    end if
+
+    // Deleting the log can immediately create a fresh one. Moving the empty
+    // temporary file over the canonical name is the actual success check.
+    log_file.delete
+    moved = temp_file.move("/var", "system.log")
+    if moved == 1 then return true
+
+    temp_file.delete
+    return false
+end function
+
+
+decipher_password_hash = function(password_hash)
+    // Preserve the legacy known-password shortcut used by this script.
+    if password_hash == "ced421b174bd05a560a4f098565d4c7b" then
+        return "madeinRussia"
+    end if
+
+    password = globals.crypto.decipher(password_hash)
+    if typeof(password) != "string" then return null
+    if password == "" then return null
+    return password
+end function
+
+
+read_password = function(requested_user, value)
+    root = root_file(value)
+    if not root then return null
+
+    passwd = resolve_from_root(root, "/etc/passwd")
+    if not passwd then return null
+    if not passwd.has_permission("r") then return null
+
+    content = passwd.get_content
+    if typeof(content) != "string" then return null
+
+    for line in content.split(char(10))
+        line = line.trim
+        if line == "" then continue
+
+        fields = line.split(":")
+        if fields.len < 2 then continue
+
+        account = fields[0]
+        if requested_user then
+            if account != requested_user then continue
+        end if
+
+        password = decipher_password_hash(fields[1])
+        if typeof(password) != "string" then continue
+
+        if globals.clear_logs then
+            if not clear_system_log(value) then
+                print("<color=yellow>Warning:</color> credential found, but system.log replacement failed.")
+            end if
+        end if
+
+        return password
+    end for
+
+    return null
+end function
+
+
+// The official Nightly v0.9.6974 change adds list-ID support. Public v0.9.6773
+// documents a scalar ID. The Nightly changelog does not document the batch
+// return shape, so normalize the plausible string/list/map forms.
+mail_text_from_value = function(value, mail_id, depth = 0)
+    if depth > 8 then return null
+
+    kind = typeof(value)
+    if kind == "string" then return value
+
+    if kind == "list" then
+        if value.len == 0 then return null
+        best_text = null
+        for item in value
+            text = mail_text_from_value(item, mail_id, depth + 1)
+            if typeof(text) != "string" then continue
+            if not best_text then
+                best_text = text
+            else if text.len > best_text.len then
+                best_text = text
+            end if
+        end for
+        return best_text
+    end if
+
+    if kind == "map" then
+        if value.hasIndex(mail_id) then return mail_text_from_value(value[mail_id], mail_id, depth + 1)
+        if value.hasIndex("content") then return mail_text_from_value(value["content"], mail_id, depth + 1)
+        if value.hasIndex("body") then return mail_text_from_value(value["body"], mail_id, depth + 1)
+        if value.hasIndex("message") then return mail_text_from_value(value["message"], mail_id, depth + 1)
+        if value.hasIndex("text") then return mail_text_from_value(value["text"], mail_id, depth + 1)
+
+        values = value.values
+        best_text = null
+        for item in values
+            text = mail_text_from_value(item, mail_id, depth + 1)
+            if typeof(text) != "string" then continue
+            if not best_text then
+                best_text = text
+            else if text.len > best_text.len then
+                best_text = text
+            end if
+        end for
+        return best_text
+    end if
+
+    return null
+end function
+
+
+is_mail_read_error = function(value)
+    if typeof(value) != "string" then return true
+    cleaned = value.trim
+    if cleaned == "" then return true
+
+    lowered = cleaned.lower
+    if lowered == "mail not found" then return true
+    if lowered.indexOf("no internet access") != null then return true
+    if lowered.indexOf("unknown error:") == 0 then return true
+    return false
+end function
+
+
+read_mail_compatible = function(mail_id)
+    // Public uses a scalar ID. Nightly added list-ID support without publishing
+    // the batch output shape, so use the scalar form first and batch as fallback.
+    scalar_result = globals.meta_mail.read(mail_id)
+    scalar_text = mail_text_from_value(scalar_result, mail_id)
+    if not is_mail_read_error(scalar_text) then return scalar_text
+
+    batch_result = globals.meta_mail.read([mail_id])
+    batch_text = mail_text_from_value(batch_result, mail_id)
+    if not is_mail_read_error(batch_text) then
+        return batch_text
+    end if
+
+    return null
+end function
+
+
+field_from_header = function(header, labels)
+    if typeof(header) != "string" then return null
+
+    for raw_line in header.split(char(10))
+        line = raw_line.trim
+        for label in labels
+            prefix = label + ":"
+            if line.indexOf(prefix) == 0 then
+                value = line[prefix.len:]
+                return value.trim
+            end if
+        end for
+    end for
+
+    return null
+end function
+
+
+parse_mail_header = function(header)
+    if typeof(header) != "string" then return null
+
+    mail_id = field_from_header(header, ["ID", "MailID", "Mail ID"])
+    subject = field_from_header(header, ["Subject"])
+
+    // Older fetch output used stable line positions. Keep a guarded fallback
+    // without relying on those positions first.
+    lines = header.split(char(10))
+    if not mail_id then
+        if lines.len > 2 then
+            pieces = lines[2].split(":")
+            if pieces.len > 1 then mail_id = pieces[1].trim
+        end if
+    end if
+    if not subject then
+        if lines.len > 4 then
+            pieces = lines[4].split(":")
+            if pieces.len > 1 then subject = pieces[1].trim
+        end if
+    end if
+
+    if not mail_id then return null
+    if not subject then return null
+    return {"id": mail_id, "subject": subject}
+end function
+
+
+between = function(text, left_marker, right_marker)
+    if typeof(text) != "string" then return null
+
+    start = text.indexOf(left_marker)
+    if start == null then return null
+    start = start + left_marker.len
+
+    relative_end = text[start:].indexOf(right_marker)
+    if relative_end == null then return null
+    return text[start:start + relative_end]
+end function
+
+
+ipv4_octets = function(text)
+    if typeof(text) != "string" then return null
+
+    // split uses a regular expression; a dot inside a character class is
+    // literal and avoids treating every character as a separator.
+    parts = text.split("[.]")
+    if parts.len != 4 then return null
+
+    octets = []
+    for part in parts
+        if part == "" then return null
+        number = part.to_int
+        if typeof(number) != "number" then return null
+        if number < 0 then return null
+        if number > 255 then return null
+        if str(number) != part then return null
+        octets.push(number)
+    end for
+
+    return octets
+end function
+
+
+is_private_ipv4 = function(text)
+    octets = ipv4_octets(text)
+    if not octets then return false
+
+    if octets[0] == 10 then return true
+    if octets[0] == 172 then
+        if octets[1] >= 16 then
+            if octets[1] <= 31 then return true
+        end if
+    end if
+    if octets[0] == 192 then
+        if octets[1] == 168 then return true
+    end if
+
+    return false
+end function
+
+
+strip_mail_markup = function(text)
+    if typeof(text) != "string" then return ""
+
+    plain = text
+    while true
+        left = plain.indexOf("<")
+        if left == null then break
+        right = plain.indexOf(">", left)
+        if right == null then break
+        plain = plain[:left] + plain[right + 1:]
+    end while
+
+    return plain.replace(char(13), "")
+end function
+
+
+trim_address_token = function(value)
+    while value.len > 0
+        if value[0] != "." then break
+        value = value[1:]
+    end while
+
+    while value.len > 0
+        if value[-1] != "." then break
+        value = value[:-1]
+    end while
+
+    return value
+end function
+
+
+contract_addresses = function(text)
+    public_ip = null
+    local_ip = null
+    candidates = text.split("[^0-9.]+")
+    if typeof(candidates) != "list" then return [public_ip, local_ip]
+
+    for raw_value in candidates
+        value = trim_address_token(raw_value)
+        if not ipv4_octets(value) then continue
+
+        if is_private_ipv4(value) then
+            if not local_ip then local_ip = value
+        else
+            if not public_ip then public_ip = value
+        end if
+    end for
+
+    return [public_ip, local_ip]
+end function
+
+
+contract_user = function(text)
+    lowered = text.lower
+    if lowered.indexOf("credentials of any user") != null then return false
+
+    markers = [
+        "login credentials of the user ",
+        "credentials of the user ",
+        "credentials of user ",
+        "the user is "]
+
+    for marker in markers
+        start = lowered.indexOf(marker)
+        if start == null then continue
+
+        remainder = text[start + marker.len:]
+        pieces = remainder.split("[^A-Za-z0-9_-]+")
+        if typeof(pieces) != "list" then return null
+        for piece in pieces
+            if piece != "" then return piece
+        end for
+    end for
+
+    return null
+end function
+
+
+parse_contract = function(body, mail_id, display_index)
+    if typeof(body) != "string" then return null
+
+    plain = strip_mail_markup(body)
+    addresses = contract_addresses(plain)
+    ip = addresses[0]
+    lan = addresses[1]
+    if not ip then return null
+    if not lan then return null
+    if not ipv4_octets(ip) then return null
+    if not is_private_ipv4(lan) then return null
+
+    requested_user = contract_user(plain)
+    if requested_user == null then return null
+    if typeof(requested_user) == "string" then
+        if requested_user.len > 30 then return null
+    end if
+
+    return {
+        "index": display_index,
+        "mail_id": mail_id,
+        "ip": ip,
+        "lan": lan,
+        "user": requested_user}
+end function
+
+
+unsafe_values = function(scan_text)
+    values = []
+    if typeof(scan_text) != "string" then return values
+
+    segments = scan_text.split("Unsafe check: ")
+    if segments.len < 2 then return values
+
+    for segment in segments[1:]
+        label_start = segment.indexOf("<b>")
+        label_end = segment.indexOf("</b>")
+        if label_start == null then continue
+        if label_end == null then continue
+        if label_end <= label_start + 3 then continue
+
+        value = segment[label_start + 3:label_end]
+        value = value.replace(char(10), "").trim
+        if value != "" then values.push(value)
+    end for
+
+    return values
+end function
+
+
+attack_service = function(ip, port, optional_arg = "")
+    objects = []
+    session = globals.metaxploit.net_use(ip, port)
+    if typeof(session) != "NetSession" then return objects
+
+    meta_lib = session.dump_lib
+    if typeof(meta_lib) != "MetaLib" then return objects
+
+    memory_areas = globals.metaxploit.scan(meta_lib)
+    if typeof(memory_areas) != "list" then return objects
+
+    for memory in memory_areas
+        scan_text = globals.metaxploit.scan_address(meta_lib, memory)
+        for unsafe_value in unsafe_values(scan_text)
+            // Prefer the no-argument form. Only use a nonempty argument when
+            // the caller supplied a required LAN target. The old script's
+            // generic password-change argument caused unrelated mutations.
+            result = meta_lib.overflow(memory, unsafe_value)
+            usable = false
+            if is_exploit_object(result) then
+                if is_target_host(result) then usable = true
+            end if
+
+            if not usable then
+                if optional_arg != "" then
+                    result = meta_lib.overflow(memory, unsafe_value, optional_arg)
+                end if
+            end if
+
+            if not is_exploit_object(result) then continue
+            if not is_target_host(result) then continue
+            objects.push(result)
+        end for
+    end for
+
+    return objects
+end function
+
+
+candidate_ports = function(router)
+    ports = []
+
+    if is_router_type(typeof(router)) then
+        used = router.used_ports
+        if typeof(used) == "list" then
+            for port_object in used
+                if typeof(port_object) != "port" then continue
+                port_number = port_object.port_number
+                if typeof(port_number) != "number" then continue
+                if ports.indexOf(port_number) == null then ports.push(port_number)
+            end for
+        end if
+    end if
+
+    // If router enumeration is unavailable, retain the classic service fallback.
+    if ports.len == 0 then ports = [80, 22, 3306]
+    return ports
+end function
+
+
+result_exists = function(mail_id)
+    for row in globals.program_results
+        if row.mail_id == mail_id then return true
+    end for
+    return false
+end function
+
+
+save_result = function(contract, password)
+    if result_exists(contract.mail_id) then return true
+
+    row = {
+        "index": contract.index,
+        "mail_id": contract.mail_id,
+        "ip": contract.ip,
+        "lan": contract.lan,
+        "user": contract.user,
+        "password": password}
+    globals.program_results.push(row)
+
+    log_path = join_path(current_path, "task.log")
+    log_file = globals.local_computer.File(log_path)
+    if not log_file then
+        created = globals.local_computer.touch(current_path, "task.log")
+        if created != 1 then
+            globals.task_log_failures = globals.task_log_failures + 1
+            print("<color=yellow>Warning:</color> could not create task.log: " + str(created))
+            return false
+        end if
+        log_file = globals.local_computer.File(log_path)
+    end if
+
+    if not log_file then
+        globals.task_log_failures = globals.task_log_failures + 1
+        print("<color=yellow>Warning:</color> task.log was created but could not be opened.")
+        return false
+    end if
+
+    old_content = log_file.get_content
+    if typeof(old_content) != "string" then
+        globals.task_log_failures = globals.task_log_failures + 1
+        print("<color=yellow>Warning:</color> task.log could not be read; it was not overwritten.")
+        return false
+    end if
+
+    user_text = contract.user
+    if not user_text then user_text = "ANY"
+
+    line = str(contract.index) + char(9) + contract.ip + char(9) + contract.lan + char(9) +
+        user_text + char(9) + password + char(10)
+    write_result = log_file.set_content(old_content + line)
+    if write_result != 1 then
+        globals.task_log_failures = globals.task_log_failures + 1
+        print("<color=yellow>Warning:</color> credential found, but task.log could not be updated.")
+        return false
+    end if
+    return true
+end function
+
+
+try_objects = function(objects, contract)
+    for object in sort_exploit_objects(objects)
+        password = read_password(contract.user, object)
+        if typeof(password) != "string" then continue
+
+        print("<color=green>Credential found:</color> " + password)
+        save_result(contract, password)
+        return true
+    end for
+
+    return false
+end function
+
+
+hack_contract = function(contract)
+    router = get_router(contract.ip)
+
+    for port in candidate_ports(router)
+        print("Trying " + contract.ip + ":" + port + "...")
+        objects = attack_service(contract.ip, port)
+        if objects.len > 0 then
+            if try_objects(objects, contract) then return true
+        end if
+    end for
+
+    // Router-kernel bounce into the requested LAN host.
+    if is_router_type(typeof(router)) then
+        public_ip = router.public_ip
+        if typeof(public_ip) == "string" then
+            print("Trying router bounce to " + contract.lan + "...")
+            objects = attack_service(public_ip, 0, contract.lan)
+            if objects.len > 0 then
+                if try_objects(objects, contract) then return true
+            end if
+        end if
+    end if
+
+    return false
+end function
+
+
+load_contracts = function()
+    contracts = []
+    summaries = globals.meta_mail.fetch
+    if typeof(summaries) != "list" then
+        exit("MetaMail.fetch failed or returned an unsupported " + typeof(summaries) + " value.")
+    end if
+
+    for summary in summaries
+        if contracts.len >= globals.mail_limit then break
+        header = parse_mail_header(summary)
+        if not header then continue
+        if header.subject != "Mission Contract" then continue
+
+        body = read_mail_compatible(header.id)
+        if typeof(body) != "string" then
+            print("Skipping mail " + header.id + ": unable to read it on this build.")
+            continue
+        end if
+
+        contract = parse_contract(body, header.id, contracts.len)
+        if not contract then
+            print("Skipping mail " + header.id + ": not a classic credential contract or format changed.")
+            continue
+        end if
+
+        contracts.push(contract)
+    end for
+
+    return contracts
+end function
+
+
+print_contracts = function(contracts)
+    print("<size=125%><b>Credential contracts</b></size>")
+    for contract in contracts
+        user_text = contract.user
+        if not user_text then user_text = "ANY"
+        print("[" + contract.index + "] " + contract.ip + " / " + contract.lan + " / " + user_text)
+    end for
+end function
+
+
+select_contracts = function(contracts)
+    choice = user_input("Indexes separated by spaces (Enter or all = all): ").trim
+    if choice == "" then return contracts
+    if choice.lower == "all" then return contracts
+
+    selected = []
+    selected_indexes = []
+    for token in choice.split(" ")
+        token = token.trim
+        if token == "" then continue
+
+        index = token.to_int
+        if typeof(index) != "number" then
+            print("Skipping invalid index: " + token)
+            continue
+        end if
+        if index < 0 then
+            print("Skipping out-of-range index: " + token)
+            continue
+        end if
+        if index >= contracts.len then
+            print("Skipping out-of-range index: " + token)
+            continue
+        end if
+        if selected_indexes.indexOf(index) != null then continue
+
+        selected_indexes.push(index)
+        selected.push(contracts[index])
+    end for
+
+    return selected
+end function
+
+
+print_summary = function()
+    print(char(10) + "<size=125%><b>Results</b></size>")
+    if globals.program_results.len == 0 then
+        print("No credentials were recovered.")
+        return
+    end if
+
+    for row in globals.program_results
+        user_text = row.user
+        if not user_text then user_text = "ANY"
+        print("[" + row.index + "] " + row.ip + " / " + row.lan + " / " + user_text + " / " + row.password)
+    end for
+
+    recovered = globals.program_results.len
+    saved = recovered - globals.task_log_failures
+    print("Recovered " + recovered + " credential(s).")
+    if saved > 0 then
+        print("Saved " + saved + " result(s) to " + join_path(current_path, "task.log") + ".")
+    end if
+    if globals.task_log_failures > 0 then
+        print("<color=yellow>Could not save " + globals.task_log_failures + " result(s); see warnings above.</color>")
+    end if
+    print("Credentials are not submitted automatically. Reply to each matching contract in Mail.exe with its password.")
+end function
+
+
+// ------------------------------ startup ------------------------------
+
+if params.len == 1 then
+    if params[0] == "-h" then exit(show_usage)
+    if params[0] == "--help" then exit(show_usage)
+end if
+if params.len > 2 then exit(show_usage)
+
+globals.mail_limit = DEFAULT_MAIL_LIMIT
+if params.len >= 1 then
+    parsed_limit = params[0].to_int
+    if typeof(parsed_limit) != "number" then exit(show_usage)
+    if parsed_limit < 1 then exit(show_usage)
+    globals.mail_limit = parsed_limit
+end if
+
+globals.clear_logs = DEFAULT_CLEAR_LOGS
+if params.len >= 2 then
+    if params[1] == "0" then
+        globals.clear_logs = 0
+    else if params[1] == "1" then
+        globals.clear_logs = 1
+    else
+        exit(show_usage)
+    end if
+end if
+
+if PIN != "" then
+    entered_pin = user_input("PIN: ", 1)
+    if entered_pin != PIN then exit("Incorrect PIN.")
+end if
+
+local_shell = get_shell
+if typeof(local_shell) != "shell" then exit("Unable to access the local shell.")
+globals.local_computer = local_shell.host_computer
+if not globals.local_computer then exit("Unable to access the local computer.")
+if not globals.local_computer.is_network_active then exit("Network is not active.")
+
+globals.metaxploit = include_lib("/lib/metaxploit.so")
+if typeof(globals.metaxploit) != "MetaxploitLib" then
+    exit("Missing or incompatible /lib/metaxploit.so.")
+end if
+
+globals.crypto = include_lib("/lib/crypto.so")
+if typeof(globals.crypto) != "cryptoLib" then
+    exit("Missing or incompatible /lib/crypto.so.")
+end if
+
+mail_user = MAIL_USER
+mail_password = MAIL_PASSWORD
+if mail_user == "" then mail_user = user_input("MetaMail address: ")
+if mail_password == "" then mail_password = user_input("MetaMail password: ", 1)
+if mail_user == "" then exit("Missing MetaMail credentials.")
+if mail_password == "" then exit("Missing MetaMail credentials.")
+
+globals.meta_mail = mail_login(mail_user, mail_password)
+if typeof(globals.meta_mail) != "MetaMail" then exit("MetaMail login failed.")
+
+globals.program_results = []
+globals.task_log_failures = 0
+
+print("AutoCred " + SCRIPT_VERSION)
+contracts = load_contracts
+if contracts.len == 0 then
+    exit("No compatible classic credential contracts were found.")
+end if
+
+print_contracts(contracts)
+selected = select_contracts(contracts)
+if selected.len == 0 then exit("No valid contracts selected.")
+
+for contract in selected
+    user_text = contract.user
+    if not user_text then user_text = "ANY"
+    print(char(10) + "[" + contract.index + "] " + contract.ip + " / " + contract.lan + " / " + user_text)
+    if not hack_contract(contract) then print("<color=red>No working exploit found.</color>")
+end for
+
+print_summary
