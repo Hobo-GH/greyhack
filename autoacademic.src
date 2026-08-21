@@ -4,7 +4,7 @@
 // access and cleanup with one supervised grade-save and mission-reply checkpoint.
 // Target baseline: Grey Hack Public v0.9.6773.
 //!!!!ATTENTION!!!!
-//configure lines 13, 14, 15, 21, 22, 23, 24, 25, 33 anything with "" needs to be filled to configure for your own system
+//configure lines 13, 14, 15, 21, 24, 25, 33 anything with "" needs to be filled to configure for your own system along with the open sections in lines 22 & 23
 
 SCRIPT_VERSION = "0.1.0-live5"
 
