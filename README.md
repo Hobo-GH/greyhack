@@ -61,7 +61,7 @@ For normal use, leave the first three fields blank. AutoCred detects the active 
 
 Compile the source as `/bin/autocred` on the machine that will perform the attacks.
 
-## Organized runtime files
+ Organized runtime files
 
 AutoCred creates missing folders automatically and keeps its files out of `/root`:
 
