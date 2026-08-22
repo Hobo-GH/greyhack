@@ -106,7 +106,7 @@ FullTree is a read-only Grey Hack terminal utility that prints a detailed, sorte
 
 Watchdog is a read-only, real-time Grey Hack system monitor. It builds an in-memory baseline of the full filesystem and running processes, then reports detected file additions, deletions, changes, process starts, stops, and PID reuse. It creates no config, log, or report files.
 
-##AutoAcademic 2.0.0
+## AutoAcademic 2.0.0
 
 AutoAcademic automates classic **Academic Changes** income jobs in Grey Hack while leaving the three unavoidable graphical/operator actions under player control.
 
