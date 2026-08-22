@@ -1,6 +1,102 @@
-## AutoCred
+## AutoCred 2.2.0
 
-AutoCred is a Grey Hack compatibility rewrite for classic Mission Contract credential jobs. It reads compatible contract mail, identifies credential targets, tries available exploit paths, and reports any recovered password for manual mission submission. It supports Grey Hack Public version 0.9.6773 and Nightly version 0.9.7052 with optional bounded system-log cleanup after a successful recovery.
+AutoCred is a Grey Hack automation tool for classic **Credentials needed** Mission Contracts. It turns the normal credential-recovery workflow into one command, one masked MetaMail password/PIN prompt, and one job selection.
+
+Choose an index, several indexes, or `all`. AutoCred reads the contracts, maps each target, attacks available services, recovers the requested credentials, finalizes logs on retained remote objects, and continues to the next selected job when one target fails.
+
+Target baseline: **Grey Hack Public v0.9.6773**.
+
+ Operator flow
+
+1. Run `autocred`.
+2. Enter the MetaMail password/PIN at the masked prompt.
+3. Select one or more contract indexes, or type `all`.
+4. Allow AutoCred to recover and print the credentials.
+5. Reply to each matching Mission Contract manually in Mail.exe using the printed password.
+
+AutoCred does **not** send Mission Contract replies automatically.
+
+ Selection commands
+
+```text
+0                 run one displayed contract
+0 2 5             run several displayed contracts
+all               run every displayed credential contract
+fresh             reload the MetaMail API snapshot
+refresh           same as fresh
+q                 quit
+```
+
+Pressing Enter at the selection prompt is also treated as `all`.
+
+ What AutoCred automates
+
+- Reads current classic credential Mission Contracts from MetaMail.
+- Separates **ANY user** jobs from contracts requesting a specific username.
+- Maps public ports, forwarded services, internal ports, and the requested LAN address.
+- Reuses known exact-version exploits from the shared ACVDB3 vulnerability database.
+- Scans unknown library versions and adds useful results back to that database.
+- Prefers exact-target computer, shell, and file objects over unrelated footholds.
+- Reads accessible `/etc/passwd` files, deciphers root credentials, and retries the exact target with elevated access.
+- Uses bounded router and LAN continuation when the requested machine is behind the public router.
+- Supports an optional vulnerable router library for PoisonLib-assisted LAN jumps.
+- Finalizes `/var/system.log` on retained cleanup-capable objects after every attempted contract.
+- Continues an `all` run after individual failures instead of stopping the entire batch.
+- Prints a final per-contract result list and a separate list of recovered credentials.
+
+ Configuration
+
+The GitHub release intentionally contains no player identity, password, IP address, or private file path:
+
+```text
+MAIL_USER = ""
+MAIL_PASSWORD = ""
+PIN = ""
+POISON_HTTP_SOURCE = ""
+```
+
+For normal use, leave the first three fields blank. AutoCred detects the active player's mail address and uses the single masked prompt as the MetaMail password.
+
+`POISON_HTTP_SOURCE` is optional. To enable the router-library fallback, place a compatible vulnerable library on the execution server and enter its absolute path. Leave it blank to disable that fallback.
+
+Compile the source as `/bin/autocred` on the machine that will perform the attacks.
+
+## Organized runtime files
+
+AutoCred creates missing folders automatically and keeps its files out of `/root`:
+
+```text
+/root/autoscripts/credential/
+├── tasks/
+│   └── current.txt
+└── logs/
+    └── latest.txt
+
+/root/vulndb/
+├── index.txt
+└── <library>/
+    └── V<major>/
+        └── shard-NNNN.txt
+```
+
+`current.txt` contains only the active run's remaining queue. It is rebuilt at startup and cleared after processing, so an old completed job list is not intentionally reused as task memory.
+
+The ACVDB3 database is shared with compatible Auto-family tools. Records retain the exact library version inside packed major-version shards, allowing later attacks to try known useful exploits before rescanning the library.
+
+ Fresh and refresh behavior
+
+`fresh` and `refresh` discard the displayed list and launch a short-lived, intake-only AutoCred worker. That worker logs into MetaMail, fetches a new API snapshot, returns it to the parent process, and exits.
+
+This worker has been confirmed to launch and return records in Grey Hack. However, it cannot force Grey Hack's game server to generate or expose newer mail. If Mail.exe and newly launched workers continue showing the same contracts, repeatedly restarting AutoCred will not repair that server-side mail state.
+
+ Important limits
+
+- Only classic credential Mission Contracts are supported. Procedural Fraud, Sabotage, and Corporate Espionage jobs are intentionally excluded.
+- Mission replies remain manual because the recovered password must be sent through Mail.exe.
+- Log finalization covers retained objects that AutoCred can still control. It cannot clean a machine when every exploit failed and no cleanup-capable object was obtained.
+- A vulnerable PoisonLib can improve router-jump coverage, but the GitHub release does not bundle one.
+- MetaMail API output is controlled by Grey Hack. `fresh` cannot repair stale server/account mail data.
+
 
 ## FullTree
 
