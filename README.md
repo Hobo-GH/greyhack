@@ -27,5 +27,73 @@ Complex networks may require a configured reverse-shell server or an optional ro
 
 Target version: **Grey Hack Public v0.9.6773**.
 
+
+# Nmap Synthwave Deep Recon
+
+Nmap Synthwave Deep Recon is an extensively expanded, read-only replacement for Grey Hack’s basic `nmap` script. It turns a simple port listing into a complete network reconnaissance report while preserving the shared synthwave appearance used by the Auto script family.
+
+This is not an exploitation tool. It performs no overflows, opens no MetaXploit sessions, writes no files, and changes no network configuration.
+
+ Usage
+
+```text
+nmap [--quick] <IP address or domain>
+```
+
+Examples:
+
+```text
+nmap 77.190.89.172
+nmap example.com
+nmap --quick 12.32.56.89
+```
+
+Full mode performs exhaustive forwarding and eligible subnet sweeps. `--quick` skips those expensive operations while retaining the normal port, router, identity, firewall, and topology information.
+
+ Features
+
+- Traditional open-port and service/version reporting
+- IP address and domain-name targets
+- Execution-host, public-IP, local-IP, gateway, user, and adapter details
+- Public WHOIS identity
+- Router and switch discovery
+- Router kernel and control-plane information
+- Wireless ESSID and BSSID reporting
+- Firewall-rule inspection
+- Visible public port-forward mapping
+- Exhaustive `0–65535` forwarding sweep
+- Detection of forwarded ports omitted by `router.used_ports`
+- Hidden-open and hidden-closed forward reporting
+- Forward destination LAN addresses
+- LAN-device inventory
+- Internal service and port mapping
+- Direct `/24` discovery when running inside the applicable LAN
+- Local switch and nested-network discovery
+- Bounded recursive topology collection
+- Explicit visibility gaps and suggested pivot points
+- Detailed scan statistics and elapsed time
+- Synthwave terminal colors with readable aligned tables
+
+ Observation Boundaries
+
+Grey Hack exposes different information depending on where the script is executed. An external scan cannot prove that every device behind a firewall or nested router has been discovered. Re-running the script from an internal foothold may reveal additional hosts, services, switches, and network segments.
+
+Public-to-internal port correlations are labeled as likely mappings. Grey Hack exposes the destination LAN address and service information but does not always expose an authoritative internal destination port.
+
+The report clearly distinguishes observed facts, inferred mappings, unavailable information, filtered systems, and areas requiring a closer network vantage.
+
+ Safety Limits
+
+To prevent runaway scans, the script includes limits for:
+
+- Recursive topology depth
+- Total observed network devices
+- Routers eligible for exhaustive port sweeps
+- Table-output size
+
+Despite its size, the script remains completely read-only.
+
+In short: Grey Hack’s original nmap tells you which ports are visible. Nmap Synthwave Deep Recon attempts to explain the entire observable network surrounding them.
+
 ## UPDATES
 All SRC files will be updated over time.
