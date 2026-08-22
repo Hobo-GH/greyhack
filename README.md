@@ -191,5 +191,9 @@ Despite its size, the script remains completely read-only.
 
 In short: Grey Hack’s original nmap tells you which ports are visible. Nmap Synthwave Deep Recon attempts to explain the entire observable network surrounding them.
 
+## Auto Tool Family
+
+The Auto Family is a collection of focused Grey Hack tools designed to work independently while sharing a common foundation. AutoRoute provides a trusted connection path, AutoNet recruits reusable network nodes, AutoDeploy distributes tools, and mission workers such as AutoCred, AutoAcademic, and AutoCorrupt automate their specific job types. Compatible tools organize their files beneath `/root/autoscripts/` and share exact-version exploit knowledge through `/root/vulndb`, so vulnerabilities discovered by one tool can improve the speed and success rate of the others over time.
+
 ## UPDATES
 All SRC files will be updated over time.
