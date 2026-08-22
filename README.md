@@ -120,7 +120,7 @@ When `done` is entered, AutoAcademic trusts that both game actions were complete
 
 Target baseline: **Grey Hack Public v0.9.6773**.
 
-## Operator flow
+ Operator flow
 
 1. Keep Mail.exe open.
 2. Run `/bin/autoacademic`.
