@@ -106,23 +106,124 @@ FullTree is a read-only Grey Hack terminal utility that prints a detailed, sorte
 
 Watchdog is a read-only, real-time Grey Hack system monitor. It builds an in-memory baseline of the full filesystem and running processes, then reports detected file additions, deletions, changes, process starts, stops, and PID reuse. It creates no config, log, or report files.
 
+##AutoAcademic 2.0.0
 
-## AutoAcademic
+AutoAcademic automates classic **Academic Changes** income jobs in Grey Hack while leaving the three unavoidable graphical/operator actions under player control.
 
-AutoAcademic is a supervised Grey Hack automation script for classic **Academic Changes** mission contracts. It reads compatible contracts from MetaMail, allows the player to select individual jobs or `all`, attacks the target network, searches for a usable computer, escalates access to root, and launches `StudentsViewer.exe` and `Mail.exe`. The script displays the required student, subject, and requested grade change before waiting for the player.
+It is not a completely unattended automation script. For every successfully accessed job, the operator must:
 
-AutoAcademic is **not a truly unattended auto script** because GreyScript cannot perform the required graphical interface actions. The player must complete three actions for every successful job:
+1. Change the requested grade and click **Save** in `StudentsViewer.exe`.
+2. Reply to the original Mission Contract and click **Send** in an already-open Mail.exe.
+3. Return to AutoAcademic, type `done`, and press Enter.
 
-1. Change and save the requested grade in `StudentsViewer.exe`.
-2. Reply to the original Mission Contract in `Mail.exe`.
-3. Return to the terminal, type `done`, and press Enter.
+When `done` is entered, AutoAcademic trusts that both game actions were completed. It removes the job from its unresolved queue, closes the viewer, waits for the resulting disconnect entry, finalizes logs through retained remote objects, and moves to the next selected contract without polling payment or customer satisfaction.
 
-After `done` is entered, AutoAcademic trusts that the player completed those actions, closes the viewer, cleans all retained remote system logs it can access, removes the completed contract from its task queue, and continues to the next selected job. Failed access attempts are recorded and skipped without stopping the remaining batch.
+Target baseline: **Grey Hack Public v0.9.6773**.
 
-Complex networks may require a configured reverse-shell server or an optional router-jump library. A vulnerable library is not included with the script. AutoAcademic can run without one, but difficult routed networks may have a lower success rate.
+## Operator flow
 
-Target version: **Grey Hack Public v0.9.6773**.
+1. Keep Mail.exe open.
+2. Run `/bin/autoacademic`.
+3. Enter the MetaMail password/PIN at the masked prompt.
+4. Select one or more contract indexes, or type `all`.
+5. Wait for the `Academic change ready` panel and root-launched `StudentsViewer.exe`.
+6. Complete the three operator actions above.
+7. Allow AutoAcademic to clean retained logs and continue the batch.
 
+ Selection commands
+
+```text
+0                 run one displayed contract
+0 2 5             run several displayed contracts
+all               run every displayed Academic contract
+refresh           merge another game-provided mail snapshot into the queue
+r                 same as refresh
+fresh             forget the unresolved queue, then collect another snapshot
+q                 quit
+```
+
+Pressing Enter at the selection prompt is treated as `all` when contracts are available.
+
+ What AutoAcademic automates
+
+- Reads classic Academic Changes contracts and extracts the public network, database LAN reference, student, subject, and requested result.
+- Maintains an unresolved-contract queue so independently observed jobs are not lost between runs.
+- Accepts any useful foothold on the contract's public network; the database LAN address is reference data, not the only valid compromise target.
+- Requires root before launching the viewer, including `/etc/passwd` recovery, password deciphering, and re-login when needed.
+- Searches exposed services, forwarded ports, internal services, remote libraries, and bounded route continuations.
+- Reuses known exact-version exploits and contributes new useful records to the shared ACVDB3 database.
+- Supports optional reverse-shell continuation and an optional vulnerable router library for PoisonLib-assisted jumps.
+- Locates or copies `StudentsViewer.exe` into `/root`, launches it as root, and prints the required student, subject, and requested change.
+- Closes viewer processes after `done` or `skip`.
+- Finalizes `/var/system.log` through retained cleanup-capable objects after the viewer closes.
+- Records individual failures and continues an `all` batch instead of stopping the entire run.
+
+ Configuration
+
+The GitHub source contains no personal mail identity, server address, password, or private file path:
+
+```text
+MAIL_USER = ""
+MAIL_PASSWORD = ""
+PIN = ""
+
+RSHELL_SERVER_IP = ""
+RSHELL_SERVER_PORT = 0
+RSHELL_SERVER_SSH_PORT = 22
+RSHELL_SERVER_SSH_USER = ""
+RSHELL_SERVER_SSH_PASSWORD = ""
+
+POISON_HTTP_SOURCE = ""
+```
+
+For normal MetaMail use, leave `MAIL_USER`, `MAIL_PASSWORD`, and `PIN` blank. AutoAcademic detects the active player's mail address and uses the single masked prompt as the MetaMail password.
+
+Reverse-shell support is optional. To enable it, fill the listener and SSH fields with the player's own server information in a private copy. Leave the address, user, and password blank to disable it.
+
+`POISON_HTTP_SOURCE` is also optional. It must point to a compatible vulnerable router library on the execution server. The GitHub release does not bundle one.
+
+ Organized runtime files
+
+```text
+/root/autoscripts/academic/
+├── tasks/
+│   └── current.txt
+└── logs/
+    ├── latest.txt
+    └── latest-partN.txt
+
+/root/vulndb/
+├── index.txt
+└── <library>/
+    └── V<major>/
+        └── shard-NNNN.txt
+```
+
+Successfully completed grade/reply checkpoints are removed from `current.txt` immediately. Failed or skipped jobs remain unresolved and can appear again. `fresh` is intentionally destructive to that unresolved queue; use it only when the stored queue should be forgotten.
+
+The ACVDB3 database stores exact library versions inside packed major-version shards. Compatible Auto-family tools can reuse useful exploits learned by AutoAcademic, and AutoAcademic can reuse exploits learned by the other tools.
+
+ MetaMail behavior
+
+Startup, `refresh`, and `fresh` request mail through a short-lived intake-only child process rather than intentionally reusing the main interpreter's MetaMail object. `refresh` merges the returned snapshot into the unresolved queue. `fresh` clears the queue before merging it.
+
+This cannot force Grey Hack's server to expose mail that is absent from the game-provided MetaMail snapshot. If Mail.exe and newly launched workers continue returning an incomplete or unchanged set, repeatedly restarting AutoAcademic cannot repair that server-side account state.
+
+ Field results
+
+The field-proven Academic engine completed **26 of 29 selected contracts** in one large Grey Hack Public run and continued through three access failures. In a separate observed job, AdminMonitor started an active trace and then reported **Active Trace cancelled** after the operator entered `done` and AutoAcademic performed retained log cleanup.
+
+These are observed results, not a guaranteed success percentage. Random networks can still provide no usable access path.
+
+ Important limits
+
+- Only classic Academic Changes contracts are supported.
+- AutoAcademic cannot click, edit, or save the graphical grade fields.
+- Mail.exe must already be open; AutoAcademic does not launch it or send the mission reply.
+- Typing `done` is the final authority. The script does not verify the grade, reply, customer response, or payment.
+- Log finalization covers retained objects AutoAcademic can still control. A machine that never returned access cannot be cleaned through that path.
+- The database LAN reference does not guarantee that exact machine is reachable or that it is the only valid viewer host.
+- PoisonLib replacement is not automatically restored after use.
 
 # Nmap Synthwave Deep Recon
 
