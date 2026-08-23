@@ -45,6 +45,57 @@ The development build scans unknown SSH libraries and adds what it learns to the
 - Failed exploitation can leave evidence on a candidate that AutoNet never controlled. The script reports that risk and cleans the execution server and its router before continuing.
 - Node credentials are stored in plaintext inside the game because AutoRoute Stage 2 needs unattended SSH reuse. Keep the AutoNet folder root-owned and do not publish its runtime shards.
 
+# AutoRoute
+
+AutoRoute is the Auto Family's persistent Grey Hack route controller. Stage 1 builds and retains a trusted SSH chain through the player's owned servers. Stage 2 can extend that chain through randomly selected, verified root-SSH nodes collected by AutoNet, then collapse the temporary proxy layer back to the owned route with reverse-order cleanup.
+
+The canonical project folder remains `RouteGuard` so existing workspace references do not break. The script, terminal command, and current product name are `AutoRoute` and `autoroute`.
+
+ Separate route stores
+
+```text
+/root/autoscripts/network/
+|-- index.txt
+`-- owned-route.txt
+
+/root/autoscripts/autonet/nodes/
+|-- index.txt
+`-- ssh-0001.txt ...
+```
+
+`owned-route.txt` contains only operator-entered, trusted infrastructure. AutoNet owns its node database on the final owned server. AutoRoute reads verified nodes from that database but never adds, edits, removes, or denies them. This prevents random proxy machines from contaminating the owned route.
+
+SSH passwords are masked during setup and never printed. The saved owned route and AutoNet records must contain reusable plaintext credentials inside the game for unattended SSH connections.
+
+ First run and Stage 1
+
+Compile the source as `/bin/autoroute`, run `autoroute`, and enter each owned SSH hop in order. AutoRoute saves the route, connects home to the final owned server, stages available computer and router cleanup objects, cleans behind itself as it advances, and opens a terminal on the current endpoint.
+
+ Stage 2 commands
+
+- `nodes`: list the verified AutoNet nodes available on the final owned server. Passwords remain hidden.
+- `extend [count]`: choose random verified nodes and extend beyond the owned route. The default is 3 hops; the current ceiling is 12.
+- `collapse`: close the proxy layer from deepest to shallowest, replace every retained proxy computer log and available router log, then clean the owned route and return to its final server.
+- `clean`, `clog`, or `logs`: replace logs across every currently retained proxy and owned layer.
+- `open`: open another terminal on the current route endpoint.
+- `status`: show the owned route, active proxy hops, and cleanup-object readiness.
+- `rebuild`: collapse any proxy layer, clean, and reconnect the saved owned route.
+- `setup`: collapse, clean, and replace the saved owned route.
+- `quit`: perform final collapse and cleanup before closing AutoRoute.
+
+ Cleanup boundary
+
+Every proxy computer must provide a usable cleanup object or AutoRoute refuses to retain it. Physical-router cleanup remains best effort and is reported separately. A later connection, terminal, or disconnect can create fresh evidence, so `collapse` performs its final proxy cleanup only after releasing each retained proxy shell.
+
+AutoRoute protects its route; it does not replace mission-target cleanup performed by AutoCred, AutoAcademic, AutoCorrupt, or another tool.
+
+ Optional private home-router escalation
+
+The public source keeps `HOME_ROUTER_PASSWORD = ""`. A private copy may fill it to escalate a guest-only home-router shell and obtain a root-backed cleanup object. Never publish that private value.
+
+The current development candidate forwards its controller as the router-clean helper. A filled private build is therefore suitable only for Chris's accepted-risk personal testing until a password-free proxy helper is split out. Temporary helper copies are removed before final cleanup, but transient placement on an untrusted proxy is not equivalent to never exposing the private binary.
+
+
 ## AutoCred 2.2.0
 
 AutoCred is a Grey Hack automation tool for classic **Credentials needed** Mission Contracts. It turns the normal credential-recovery workflow into one command, one masked MetaMail password/PIN prompt, and one job selection.
