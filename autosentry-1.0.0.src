@@ -1,0 +1,1115 @@
+//Made By Hobo
+// AutoSentry 1.0.0
+// Grey Hack / GreyScript persistent filesystem baseline and live monitor.
+//
+// Usage:
+//   autosentry [refresh_seconds]
+//   autosentry check
+//   autosentry accept
+//
+// The trusted filesystem baseline persists under /root/autoscripts/sentry.
+// Dot-prefixed
+// files and folders are included and explicitly marked HIDDEN in alerts.
+// Readable non-binary files are MD5-hashed. The current File API does not expose
+// binary contents, so same-path binary content changes are visible only when
+// exposed metadata also changes. Process state remains live and memory-only.
+
+SCRIPT_VERSION = "1.0.0"
+STATE_ROOT = "/root/autoscripts/sentry"
+LEGACY_STATE_ROOT = "/root/sentry"
+STATE_INDEX = STATE_ROOT + "/index.txt"
+STATE_BANK_A = STATE_ROOT + "/baseline-a"
+STATE_BANK_B = STATE_ROOT + "/baseline-b"
+STATE_INDEX_HEADER = "SENTRYINDEX1"
+STATE_SHARD_HEADER = "SENTRYSHARD1"
+STATE_SHARD_PREFIX = "shard-"
+STATE_SHARD_LIMIT = 120000
+
+usage = "AutoSentry " + SCRIPT_VERSION + char(10) +
+    "Usage:" + char(10) +
+    "  autosentry                     compare the saved baseline, then watch live" + char(10) +
+    "  autosentry <seconds>           watch with a custom delay (minimum 0.1)" + char(10) +
+    "  autosentry check               compare once and exit" + char(10) +
+    "  autosentry accept              review and explicitly trust current state" + char(10) +
+    "  autosentry help | -h | --help  show this help" + char(10) + char(10) +
+    "The first run creates /root/autoscripts/sentry automatically. Later changes" + char(10) +
+    "are never" + char(10) +
+    "silently accepted. Hidden dot-paths such as /root/.Trash are monitored."
+
+shell = get_shell
+if shell == null then exit("autosentry: no active shell")
+
+computer = shell.host_computer
+if computer == null then exit("autosentry: no host computer")
+
+paint = function(text, color)
+    return "<color=#" + color + ">" + str(text) + "</color>"
+end function
+
+C = {
+    "title": "D86CFF",
+    "cyan": "55E7FF",
+    "dim": "A79BC8",
+    "add": "63FF9B",
+    "delete": "FF5C7C",
+    "modify": "FFB86B",
+    "process": "FF79C6",
+    "issue": "FFB86B",
+    "good": "63FF9B",
+}
+
+// Reject partial numeric strings instead of silently accepting their prefix.
+validIntervalText = function(raw)
+    text = raw.trim
+    if text.len == 0 then return false
+
+    dots = 0
+    digits = 0
+    for letter in text
+        if letter == "." then
+            dots = dots + 1
+            if dots > 1 then return false
+        else if "0123456789".indexOf(letter) != null then
+            digits = digits + 1
+        else
+            return false
+        end if
+    end for
+
+    return digits > 0
+end function
+
+refresh = 1
+mode = "watch"
+args = params
+if args == null then args = []
+if args.len > 1 then exit("autosentry: too many arguments" + char(10) + usage)
+
+if args.len == 1 then
+    arg = args[0].trim.lower
+    if arg == "help" or arg == "-h" or arg == "--help" then exit(usage)
+    if arg == "check" or arg == "accept" then
+        mode = arg
+    else
+        if not validIntervalText(arg) then
+            exit("autosentry: expected check, accept, help, or a refresh number" + char(10) + usage)
+        end if
+
+        refresh = arg.val
+        if refresh < 0.1 then
+            exit("autosentry: refresh must be at least 0.1 seconds" + char(10) + usage)
+        end if
+    end if
+end if
+
+shown = function(value)
+    if value == null or value == "~" then return "<unavailable>"
+    return str(value)
+end function
+
+kindName = function(entry)
+    if entry == null then return "UNKNOWN"
+    prefix = ""
+    if entry.hasIndex("hidden") and entry["hidden"] == "1" then prefix = "HIDDEN "
+    return prefix + entry["kind"]
+end function
+
+stateValue = function(value)
+    if value == null then return "~"
+    return str(value)
+end function
+
+isHiddenPath = function(path)
+    for part in path.split("/")
+        if part.len > 0 and part[0] == "." then return true
+    end for
+    return false
+end function
+
+isManagedStatePath = function(path)
+    if path == STATE_INDEX then return true
+    if path.indexOf(STATE_BANK_A + "/" + STATE_SHARD_PREFIX) == 0 then return true
+    if path.indexOf(STATE_BANK_B + "/" + STATE_SHARD_PREFIX) == 0 then return true
+    return false
+end function
+
+addIssue = function(issues, message)
+    issues[message] = 1
+end function
+
+// A snapshot retains metadata and hashes, never File objects or file content.
+// Dot-prefixed names are not filtered. Only AutoSentry's own index and bank shards
+// are omitted so saving state cannot create false intrusion alerts.
+scanFilesystem = function
+    entries = {}
+    issues = {}
+    counts = {"dir": 0, "file": 0, "binary": 0, "link": 0, "unknown": 0, "hidden": 0}
+    symlinkApi = false
+
+    root = computer.File("/")
+    if root == null then
+        addIssue(issues, "filesystem root / was unavailable")
+        return {"entries": entries, "issues": issues, "counts": counts, "symlink_api": symlinkApi}
+    end if
+
+    pending = [root]
+    seen = {}
+
+    while pending.len > 0
+        node = pending.pop
+        if node == null then
+            addIssue(issues, "filesystem enumeration returned a null item")
+            continue
+        end if
+
+        nodePath = node.path
+        if nodePath == null or nodePath == "" then
+            addIssue(issues, "an item had no usable path")
+            continue
+        end if
+        if seen.hasIndex(nodePath) then
+            addIssue(issues, "duplicate path was not traversed twice: " + nodePath)
+            continue
+        end if
+        seen[nodePath] = 1
+
+        folderState = node.is_folder
+        linkSupported = node.hasIndex("is_symlink")
+        linkState = 0
+        if linkSupported then
+            symlinkApi = true
+            linkState = node.is_symlink
+        end if
+
+        isFolder = folderState == 1
+        isLink = linkSupported and linkState == 1
+        isBinary = null
+        kind = "FILE"
+        if folderState == null or (linkSupported and linkState == null) then
+            kind = "UNKNOWN"
+        else if isLink then
+            kind = "LINK"
+        else if isFolder then
+            kind = "DIR"
+        else
+            isBinary = node.is_binary
+            if isBinary == 1 then kind = "BINARY"
+        end if
+
+        managed = isManagedStatePath(nodePath)
+        if not managed then
+            if kind == "UNKNOWN" then
+                counts["unknown"] = counts["unknown"] + 1
+                addIssue(issues, "item type became unavailable: " + nodePath)
+            else if kind == "LINK" then
+                counts["link"] = counts["link"] + 1
+            else if kind == "DIR" then
+                counts["dir"] = counts["dir"] + 1
+            else
+                counts["file"] = counts["file"] + 1
+                if kind == "BINARY" then counts["binary"] = counts["binary"] + 1
+            end if
+
+            hidden = isHiddenPath(nodePath)
+            if hidden then counts["hidden"] = counts["hidden"] + 1
+            hiddenState = "0"
+            if hidden then hiddenState = "1"
+
+            permissionsValue = node.permissions
+            ownerValue = node.owner
+            groupValue = node.group
+            sizeValue = node.size
+            // Directory content changes are represented by their child entries.
+            // A stable marker prevents AutoSentry's own shard writes from changing
+            // an ancestor directory size and generating a false alert.
+            if isFolder then sizeValue = "directory"
+            if permissionsValue == null then addIssue(issues, "permissions unavailable: " + nodePath)
+            if ownerValue == null then addIssue(issues, "owner unavailable: " + nodePath)
+            if groupValue == null then addIssue(issues, "group unavailable: " + nodePath)
+            if sizeValue == null and not isFolder then addIssue(issues, "size unavailable: " + nodePath)
+
+            linkTarget = null
+            if isLink then linkTarget = node.path(1)
+
+            digest = null
+            contentState = "not-applicable"
+            if not isFolder and not isLink then
+                if isBinary == 1 then
+                    contentState = "binary-api-unavailable"
+                else if isBinary == 0 then
+                    content = node.get_content
+                    if typeof(content) == "string" then
+                        digest = md5(content)
+                        contentState = "hashed"
+                    else
+                        contentState = "unreadable"
+                        addIssue(issues, "readable-file hash unavailable: " + nodePath)
+                    end if
+                else
+                    contentState = "type-unavailable"
+                    addIssue(issues, "binary state unavailable: " + nodePath)
+                end if
+            end if
+
+            entries[nodePath] = {
+                "kind": kind,
+                "hidden": hiddenState,
+                "permissions": stateValue(permissionsValue),
+                "owner": stateValue(ownerValue),
+                "group": stateValue(groupValue),
+                "size": stateValue(sizeValue),
+                "binary": stateValue(isBinary),
+                "target": stateValue(linkTarget),
+                "digest": stateValue(digest),
+                "content_state": stateValue(contentState),
+            }
+        end if
+
+        // A link is an item to monitor, never an edge to follow.
+        if isFolder and not isLink then
+            folders = node.get_folders
+            files = node.get_files
+            if typeof(folders) == "list" then
+                for child in folders
+                    pending.push(child)
+                end for
+            else if not managed then
+                addIssue(issues, "could not enumerate folders in " + nodePath)
+            end if
+            if typeof(files) == "list" then
+                for child in files
+                    pending.push(child)
+                end for
+            else if not managed then
+                addIssue(issues, "could not enumerate files in " + nodePath)
+            end if
+        end if
+    end while
+
+    return {"entries": entries, "issues": issues, "counts": counts, "symlink_api": symlinkApi}
+end function
+
+isDigits = function(text)
+    if text.len == 0 then return false
+    for letter in text
+        if "0123456789".indexOf(letter) == null then return false
+    end for
+    return true
+end function
+
+isFileObject = function(value)
+    return typeof(value).lower == "file"
+end function
+
+joinPath = function(parent, name)
+    if parent == "/" then return "/" + name
+    return parent + "/" + name
+end function
+
+ensureFolder = function(parentPath, name)
+    parent = computer.File(parentPath)
+    if not isFileObject(parent) or not parent.is_folder then return null
+    path = joinPath(parent.path, name)
+    folder = computer.File(path)
+    if isFileObject(folder) then
+        if folder.is_folder then return folder
+        return null
+    end if
+    if not parent.has_permission("w") or not parent.has_permission("x") then return null
+    computer.create_folder(parent.path, name)
+    folder = computer.File(path)
+    if isFileObject(folder) and folder.is_folder then return folder
+    return null
+end function
+
+initStateStorage = function
+    autoscripts = ensureFolder("/root", "autoscripts")
+    if not isFileObject(autoscripts) then return null
+    root = ensureFolder(autoscripts.path, "sentry")
+    if not isFileObject(root) then return null
+    bankA = ensureFolder(root.path, "baseline-a")
+    bankB = ensureFolder(root.path, "baseline-b")
+    if not isFileObject(bankA) or not isFileObject(bankB) then return null
+    return {"root": root, "a": bankA, "b": bankB}
+end function
+
+ensureTextFile = function(folder, name)
+    if not isFileObject(folder) or not folder.is_folder then return null
+    file = computer.File(joinPath(folder.path, name))
+    if isFileObject(file) then
+        if file.is_folder then return null
+        return file
+    end if
+    if computer.touch(folder.path, name) != 1 then return null
+    file = computer.File(joinPath(folder.path, name))
+    if isFileObject(file) and not file.is_folder then return file
+    return null
+end function
+
+legacyHasUnexpectedItems = function(legacy)
+    files = legacy.get_files
+    folders = legacy.get_folders
+    if typeof(files) != "list" or typeof(folders) != "list" then return true
+    for file in files
+        if file.name != "index.txt" then return true
+    end for
+    for folder in folders
+        if folder.name != "baseline-a" and folder.name != "baseline-b" then return true
+        nested = folder.get_folders
+        bankFiles = folder.get_files
+        if typeof(nested) != "list" or typeof(bankFiles) != "list" then return true
+        if nested.len > 0 then return true
+        for file in bankFiles
+            if file.name.indexOf(STATE_SHARD_PREFIX) != 0 then return true
+        end for
+    end for
+    return false
+end function
+
+legacyHasBaselinePayload = function(legacy)
+    files = legacy.get_files
+    if typeof(files) == "list" then
+        for file in files
+            if file.name == "index.txt" then return true
+        end for
+    end if
+    folders = legacy.get_folders
+    if typeof(folders) == "list" then
+        for folder in folders
+            bankFiles = folder.get_files
+            if typeof(bankFiles) == "list" and bankFiles.len > 0 then return true
+        end for
+    end if
+    return false
+end function
+
+cleanupLegacyState = function(legacy)
+    if not isFileObject(legacy) or not legacy.is_folder then return false
+    if legacyHasUnexpectedItems(legacy) then return false
+    folders = legacy.get_folders
+    if typeof(folders) == "list" then
+        for folder in folders
+            files = folder.get_files
+            if typeof(files) == "list" then
+                for file in files
+                    file.delete
+                end for
+            end if
+            folder.delete
+        end for
+    end if
+    files = legacy.get_files
+    if typeof(files) == "list" then
+        for file in files
+            if file.name == "index.txt" then file.delete
+        end for
+    end if
+    legacy.delete
+    return not isFileObject(computer.File(LEGACY_STATE_ROOT))
+end function
+
+copyLegacyBank = function(legacy, storage, bankName, bankKey)
+    source = computer.File(joinPath(legacy.path, bankName))
+    if not isFileObject(source) then return true
+    if not source.is_folder then return false
+    files = source.get_files
+    if typeof(files) != "list" then return false
+    for oldFile in files
+        if oldFile.name.indexOf(STATE_SHARD_PREFIX) != 0 then continue
+        content = oldFile.get_content
+        if typeof(content) != "string" then return false
+        newFile = ensureTextFile(storage[bankKey], oldFile.name)
+        if not writeVerified(newFile, content) then return false
+    end for
+    return true
+end function
+
+migrateLegacyState = function(storage)
+    legacy = computer.File(LEGACY_STATE_ROOT)
+    if not isFileObject(legacy) then return {"found": 0}
+    if not legacy.is_folder then return {"found": 1, "ok": 0, "reason": "legacy path is not a folder"}
+    if legacyHasUnexpectedItems(legacy) then
+        return {"found": 1, "ok": 0, "reason": "legacy folder contains unexpected data"}
+    end if
+
+    current = loadBaseline
+    if current["state"] == "ready" then
+        removed = cleanupLegacyState(legacy)
+        return {"found": 1, "ok": 1, "migrated": 0, "removed": removed}
+    end if
+
+    oldIndex = computer.File(joinPath(legacy.path, "index.txt"))
+    if not isFileObject(oldIndex) then
+        if not legacyHasBaselinePayload(legacy) then
+            removed = cleanupLegacyState(legacy)
+            return {"found": 1, "ok": 1, "migrated": 0, "removed": removed}
+        end if
+        return {"found": 1, "ok": 0, "reason": "legacy baseline has shards but no index"}
+    end if
+    indexContent = oldIndex.get_content
+    if typeof(indexContent) != "string" then
+        return {"found": 1, "ok": 0, "reason": "legacy index is unreadable"}
+    end if
+    if not copyLegacyBank(legacy, storage, "baseline-a", "a") then
+        return {"found": 1, "ok": 0, "reason": "legacy bank A copy failed"}
+    end if
+    if not copyLegacyBank(legacy, storage, "baseline-b", "b") then
+        return {"found": 1, "ok": 0, "reason": "legacy bank B copy failed"}
+    end if
+    newIndex = ensureTextFile(storage["root"], "index.txt")
+    if not writeVerified(newIndex, indexContent) then
+        return {"found": 1, "ok": 0, "reason": "legacy index copy failed"}
+    end if
+    verified = loadBaseline
+    if verified["state"] != "ready" then
+        reason = "copied baseline did not verify"
+        if verified.hasIndex("reason") then reason = reason + ": " + verified["reason"]
+        return {"found": 1, "ok": 0, "reason": reason}
+    end if
+    removed = cleanupLegacyState(legacy)
+    return {"found": 1, "ok": 1, "migrated": 1, "removed": removed}
+end function
+
+shardName = function(number)
+    digits = str(number)
+    while digits.len < 4
+        digits = "0" + digits
+    end while
+    return STATE_SHARD_PREFIX + digits + ".txt"
+end function
+
+encodeField = function(value)
+    text = stateValue(value)
+    return text.replace("%", "%25").replace("[|]", "%7C").replace(char(10), "%0A").replace(char(13), "%0D")
+end function
+
+decodeField = function(value)
+    return value.replace("%0D", char(13)).replace("%0A", char(10)).replace("%7C", "|").replace("%25", "%")
+end function
+
+isInterleavedPipeText = function(value)
+    if typeof(value) != "string" then return false
+    if value.len == 0 then return false
+    index = 0
+    while index < value.len
+        if value[index] != "|" then return false
+        index = index + 2
+    end while
+    return index == value.len + 1
+end function
+
+unweaveInjectedPipes = function(value)
+    if typeof(value) != "string" then return value
+    repaired = ""
+    index = 1
+    while index < value.len
+        repaired = repaired + value[index]
+        index = index + 2
+    end while
+    // Percent, newline, and carriage-return escapes were separated by the bad
+    // pipe weave before the normal decoder could see them. Decode once more.
+    return decodeField(repaired)
+end function
+
+repairInterleavedBaseline = function(entries)
+    paths = entries.indexes
+    if paths.len == 0 then return {"state": "clean", "entries": entries, "count": 0}
+
+    corrupted = 0
+    for path in paths
+        if isInterleavedPipeText(path) then corrupted = corrupted + 1
+    end for
+    if corrupted == 0 then return {"state": "clean", "entries": entries, "count": 0}
+    if corrupted != paths.len then return {"state": "mixed", "entries": entries, "count": corrupted}
+
+    repaired = {}
+    fields = ["kind", "hidden", "permissions", "owner", "group", "size", "binary", "target", "digest", "content_state"]
+    for oldPath in paths
+        newPath = unweaveInjectedPipes(oldPath)
+        if newPath.len == 0 or repaired.hasIndex(newPath) then
+            return {"state": "invalid", "entries": entries, "count": corrupted}
+        end if
+
+        oldEntry = entries[oldPath]
+        newEntry = {}
+        for field in fields
+            newEntry[field] = unweaveInjectedPipes(oldEntry[field])
+        end for
+        repaired[newPath] = newEntry
+    end for
+    return {"state": "repairable", "entries": repaired, "count": corrupted}
+end function
+
+serializeEntry = function(path, entry)
+    return "E|" + encodeField(path) +
+        "|" + encodeField(entry["kind"]) +
+        "|" + encodeField(entry["hidden"]) +
+        "|" + encodeField(entry["permissions"]) +
+        "|" + encodeField(entry["owner"]) +
+        "|" + encodeField(entry["group"]) +
+        "|" + encodeField(entry["size"]) +
+        "|" + encodeField(entry["binary"]) +
+        "|" + encodeField(entry["target"]) +
+        "|" + encodeField(entry["digest"]) +
+        "|" + encodeField(entry["content_state"])
+end function
+
+parseEntry = function(line)
+    fields = line.split("[|]")
+    if fields.len != 12 or fields[0] != "E" then return null
+    path = decodeField(fields[1])
+    if path.len == 0 then return null
+    return {
+        "path": path,
+        "entry": {
+            "kind": decodeField(fields[2]),
+            "hidden": decodeField(fields[3]),
+            "permissions": decodeField(fields[4]),
+            "owner": decodeField(fields[5]),
+            "group": decodeField(fields[6]),
+            "size": decodeField(fields[7]),
+            "binary": decodeField(fields[8]),
+            "target": decodeField(fields[9]),
+            "digest": decodeField(fields[10]),
+            "content_state": decodeField(fields[11]),
+        },
+    }
+end function
+
+loadStateIndex = function
+    file = computer.File(STATE_INDEX)
+    if not isFileObject(file) then return {"state": "missing"}
+    if file.is_folder then return {"state": "invalid", "reason": "index path is a folder"}
+    content = file.get_content
+    if typeof(content) != "string" then return {"state": "invalid", "reason": "index unreadable"}
+    lines = content.replace(char(13), "").split(char(10))
+    if lines.len < 6 or lines[0] != STATE_INDEX_HEADER then
+        return {"state": "invalid", "reason": "index header or fields invalid"}
+    end if
+    values = {}
+    for line in lines[1:]
+        parts = line.split("[|]")
+        if parts.len == 2 then values[parts[0]] = parts[1]
+    end for
+    required = ["active", "shards", "entries", "checksum", "saved"]
+    for key in required
+        if not values.hasIndex(key) then return {"state": "invalid", "reason": "index missing " + key}
+    end for
+    if values["active"] != "a" and values["active"] != "b" then
+        return {"state": "invalid", "reason": "index active bank invalid"}
+    end if
+    if not isDigits(values["shards"]) or not isDigits(values["entries"]) then
+        return {"state": "invalid", "reason": "index counts invalid"}
+    end if
+    return {
+        "state": "ready",
+        "active": values["active"],
+        "shards": values["shards"].val,
+        "entries": values["entries"].val,
+        "checksum": values["checksum"],
+        "saved": values["saved"],
+    }
+end function
+
+bankPath = function(bank)
+    if bank == "a" then return STATE_BANK_A
+    return STATE_BANK_B
+end function
+
+loadBaseline = function
+    index = loadStateIndex
+    if index["state"] != "ready" then return index
+    if index["shards"] < 1 then return {"state": "invalid", "reason": "index has no shards"}
+
+    payload = []
+    number = 1
+    while number <= index["shards"]
+        file = computer.File(joinPath(bankPath(index["active"]), shardName(number)))
+        if not isFileObject(file) or file.is_folder then
+            return {"state": "invalid", "reason": "baseline shard missing: " + shardName(number)}
+        end if
+        content = file.get_content
+        if typeof(content) != "string" then
+            return {"state": "invalid", "reason": "baseline shard unreadable: " + shardName(number)}
+        end if
+        lines = content.replace(char(13), "").split(char(10))
+        if lines.len < 1 or lines[0] != STATE_SHARD_HEADER then
+            return {"state": "invalid", "reason": "baseline shard header invalid: " + shardName(number)}
+        end if
+        for line in lines[1:]
+            if line.len > 0 then payload.push(line)
+        end for
+        number = number + 1
+    end while
+
+    if md5(payload.join(char(10))) != index["checksum"] then
+        return {"state": "invalid", "reason": "baseline checksum mismatch"}
+    end if
+
+    entries = {}
+    for line in payload
+        parsed = parseEntry(line)
+        if parsed == null then return {"state": "invalid", "reason": "baseline entry malformed"}
+        path = parsed["path"]
+        if entries.hasIndex(path) then return {"state": "invalid", "reason": "duplicate baseline path: " + path}
+        entries[path] = parsed["entry"]
+    end for
+    if entries.indexes.len != index["entries"] then
+        return {"state": "invalid", "reason": "baseline entry count mismatch"}
+    end if
+    index["entries_map"] = entries
+    return index
+end function
+
+writeVerified = function(file, content)
+    if not isFileObject(file) then return false
+    if file.set_content(content) != 1 then return false
+    readback = file.get_content
+    if typeof(readback) != "string" then return false
+    return md5(readback) == md5(content)
+end function
+
+saveBaseline = function(entries, storage)
+    if storage == null then return {"ok": 0, "reason": "state folders unavailable"}
+    currentIndex = loadStateIndex
+    target = "a"
+    if currentIndex["state"] == "ready" and currentIndex["active"] == "a" then target = "b"
+    folder = storage[target]
+    if not isFileObject(folder) then return {"ok": 0, "reason": "target baseline bank unavailable"}
+
+    payload = []
+    paths = entries.indexes
+    paths.sort
+    for path in paths
+        payload.push(serializeEntry(path, entries[path]))
+    end for
+
+    // Retire stale files in the inactive bank before writing the new complete set.
+    oldFiles = folder.get_files
+    if typeof(oldFiles) == "list" then
+        for oldFile in oldFiles
+            if oldFile.name.indexOf(STATE_SHARD_PREFIX) == 0 then
+                oldFile.set_content(STATE_SHARD_HEADER + char(10) + "RETIRED")
+            end if
+        end for
+    end if
+
+    shards = []
+    shardLines = [STATE_SHARD_HEADER]
+    shardSize = STATE_SHARD_HEADER.len
+    for line in payload
+        if shardSize + line.len + 1 > STATE_SHARD_LIMIT and shardLines.len > 1 then
+            shards.push(shardLines.join(char(10)))
+            shardLines = [STATE_SHARD_HEADER]
+            shardSize = STATE_SHARD_HEADER.len
+        end if
+        shardLines.push(line)
+        shardSize = shardSize + line.len + 1
+    end for
+    shards.push(shardLines.join(char(10)))
+
+    number = 1
+    for content in shards
+        file = ensureTextFile(folder, shardName(number))
+        if not writeVerified(file, content) then
+            return {"ok": 0, "reason": "could not write or verify " + shardName(number)}
+        end if
+        number = number + 1
+    end for
+
+    checksum = md5(payload.join(char(10)))
+    indexText = STATE_INDEX_HEADER + char(10) +
+        "active|" + target + char(10) +
+        "shards|" + shards.len + char(10) +
+        "entries|" + entries.indexes.len + char(10) +
+        "checksum|" + checksum + char(10) +
+        "saved|" + current_date
+    indexFile = ensureTextFile(storage["root"], "index.txt")
+    if not writeVerified(indexFile, indexText) then
+        return {"ok": 0, "reason": "could not commit baseline index"}
+    end if
+    return {"ok": 1, "bank": target, "shards": shards.len, "entries": entries.indexes.len, "checksum": checksum}
+end function
+
+scanProcesses = function
+    processes = {}
+    issues = {}
+    raw = computer.show_procs
+
+    if typeof(raw) != "string" then
+        addIssue(issues, "show_procs returned no process table")
+        return {"processes": processes, "issues": issues}
+    end if
+
+    malformed = 0
+    for rawLine in raw.split(char(10))
+        line = rawLine.replace(char(13), "").replace(char(9), " ").trim
+        if line.len == 0 then continue
+
+        fields = []
+        for field in line.split(" ")
+            field = field.trim
+            if field.len > 0 then fields.push(field)
+        end for
+
+        // Expected columns: USER PID CPU MEM COMMAND. The header is not an
+        // error, and commands containing spaces remain intact via join.
+        if fields.len >= 2 and fields[1].upper == "PID" then continue
+        if fields.len < 5 then
+            malformed = malformed + 1
+            continue
+        end if
+
+        pidText = fields[1]
+        if not isDigits(pidText) then
+            malformed = malformed + 1
+            continue
+        end if
+
+        processes[pidText] = {
+            "pid": pidText,
+            "user": fields[0],
+            "name": fields[4:].join(" "),
+            "cpu": fields[2],
+            "mem": fields[3],
+        }
+    end for
+
+    if malformed > 0 then
+        addIssue(issues, "process parser ignored " + malformed + " malformed row(s)")
+    end if
+
+    return {"processes": processes, "issues": issues}
+end function
+
+describeProcess = function(proc)
+    return "PID " + proc["pid"] + " " + proc["name"] + " [" + proc["user"] + "]"
+end function
+
+sameProcessIdentity = function(a, b)
+    return a["user"] == b["user"] and a["name"] == b["name"]
+end function
+
+changedFields = function(oldEntry, newEntry)
+    changes = []
+
+    if oldEntry["kind"] != newEntry["kind"] then
+        changes.push("type " + shown(oldEntry["kind"]) + " -> " + shown(newEntry["kind"]))
+    end if
+    if oldEntry["hidden"] != newEntry["hidden"] then
+        changes.push("hidden " + shown(oldEntry["hidden"]) + " -> " + shown(newEntry["hidden"]))
+    end if
+    if oldEntry["permissions"] != newEntry["permissions"] then
+        changes.push("permissions " + shown(oldEntry["permissions"]) + " -> " + shown(newEntry["permissions"]))
+    end if
+    if oldEntry["owner"] != newEntry["owner"] then
+        changes.push("owner " + shown(oldEntry["owner"]) + " -> " + shown(newEntry["owner"]))
+    end if
+    if oldEntry["group"] != newEntry["group"] then
+        changes.push("group " + shown(oldEntry["group"]) + " -> " + shown(newEntry["group"]))
+    end if
+    if oldEntry["size"] != newEntry["size"] then
+        changes.push("size " + shown(oldEntry["size"]) + " -> " + shown(newEntry["size"]))
+    end if
+    if oldEntry["binary"] != newEntry["binary"] then
+        changes.push("binary " + shown(oldEntry["binary"]) + " -> " + shown(newEntry["binary"]))
+    end if
+    if oldEntry["target"] != newEntry["target"] then
+        changes.push("target " + shown(oldEntry["target"]) + " -> " + shown(newEntry["target"]))
+    end if
+    if oldEntry["content_state"] != newEntry["content_state"] then
+        changes.push("content-state " + oldEntry["content_state"] + " -> " + newEntry["content_state"])
+    else if newEntry["content_state"] == "hashed" and oldEntry["digest"] != newEntry["digest"] then
+        changes.push("text content")
+    end if
+
+    return changes
+end function
+
+emitFilesystemChanges = function(previous, current, stamp)
+    added = 0
+    deleted = 0
+    modified = 0
+
+    currentPaths = current.indexes
+    currentPaths.sort
+    for path in currentPaths
+        newEntry = current[path]
+        if not previous.hasIndex(path) then
+            added = added + 1
+            print(stamp + " " + paint("FS ADD", C.add) + " [" + kindName(newEntry) + "] " + path)
+        else
+            fields = changedFields(previous[path], newEntry)
+            if fields.len > 0 then
+                modified = modified + 1
+                print(stamp + " " + paint("FS CHANGE", C.modify) + " [" + kindName(newEntry) + "] " + path + " | " + fields.join(", "))
+            end if
+        end if
+    end for
+
+    previousPaths = previous.indexes
+    previousPaths.sort
+    for path in previousPaths
+        if not current.hasIndex(path) then
+            deleted = deleted + 1
+            print(stamp + " " + paint("FS DELETE", C.delete) + " [" + kindName(previous[path]) + "] " + path)
+        end if
+    end for
+
+    return {"added": added, "deleted": deleted, "modified": modified}
+end function
+
+emitProcessChanges = function(previous, current, stamp)
+    started = 0
+    stopped = 0
+    reused = 0
+
+    currentPids = current.indexes
+    currentPids.sort
+    for pidText in currentPids
+        proc = current[pidText]
+        if not previous.hasIndex(pidText) then
+            started = started + 1
+            print(stamp + " " + paint("PROCESS START", C.process) + " " + describeProcess(proc))
+        else if not sameProcessIdentity(previous[pidText], proc) then
+            reused = reused + 1
+            print(stamp + " " + paint("PID REUSED", C.modify) + " " + describeProcess(previous[pidText]) + " -> " + describeProcess(proc))
+        end if
+    end for
+
+    previousPids = previous.indexes
+    previousPids.sort
+    for pidText in previousPids
+        if not current.hasIndex(pidText) then
+            stopped = stopped + 1
+            print(stamp + " " + paint("PROCESS STOP", C.delete) + " " + describeProcess(previous[pidText]))
+        end if
+    end for
+
+    return {"started": started, "stopped": stopped, "reused": reused}
+end function
+
+emitIssueChanges = function(previous, current, stamp)
+    opened = 0
+    resolved = 0
+
+    currentIssues = current.indexes
+    currentIssues.sort
+    for issue in currentIssues
+        if not previous.hasIndex(issue) then
+            opened = opened + 1
+            print(stamp + " " + paint("SCAN ISSUE", C.issue) + " " + issue)
+        end if
+    end for
+
+    previousIssues = previous.indexes
+    previousIssues.sort
+    for issue in previousIssues
+        if not current.hasIndex(issue) then
+            resolved = resolved + 1
+            print(stamp + " " + paint("ISSUE RESOLVED", C.good) + " " + issue)
+        end if
+    end for
+
+    return {"opened": opened, "resolved": resolved}
+end function
+
+mergeIssues = function(filesystemIssues, processIssues)
+    result = {}
+    for issue in filesystemIssues.indexes
+        result["filesystem: " + issue] = 1
+    end for
+    for issue in processIssues.indexes
+        result["processes: " + issue] = 1
+    end for
+    return result
+end function
+
+filesystemTotal = function(scan)
+    return scan["entries"].indexes.len
+end function
+
+print(paint("AUTOSENTRY // PERSISTENT SYSTEM WATCH", C.title))
+print("Version: " + SCRIPT_VERSION + " | Host: " + paint(shown(computer.get_name), C.cyan) + " | User: " + active_user)
+print(paint("Trusted baseline: " + STATE_ROOT + " | mode=" + mode, C.dim))
+print(paint("Hidden dot-paths are included and labeled HIDDEN.", C.title))
+print(paint("Polling caveat: changes made and reversed between completed live scans can be missed.", C.dim))
+print(paint("Text is hashed; same-path binary content needs an exposed metadata change to be visible.", C.dim))
+print("")
+
+storage = initStateStorage
+if storage == null then
+    exit(paint("AUTOSENTRY ERROR", C.delete) + " could not create or access " + STATE_ROOT + "; run as root and check path permissions")
+end if
+
+migration = migrateLegacyState(storage)
+if migration["found"] == 1 then
+    if migration["ok"] != 1 then
+        exit(paint("AUTOSENTRY MIGRATION BLOCKED", C.delete) + " | " + migration["reason"] + char(10) +
+            "The old /root/sentry folder was preserved. Resolve it, then run /bin/autosentry again.")
+    end if
+    if migration["migrated"] == 1 then
+        print(paint("LEGACY BASELINE MIGRATED", C.good) + " | /root/sentry -> " + STATE_ROOT)
+        print(paint("One-time state-folder additions/deletions may be reported; review them before autosentry accept.", C.issue))
+    end if
+    if migration["removed"] == 1 then
+        print(paint("COMMAND COLLISION REMOVED", C.good) + " | retired /root/sentry")
+    else
+        print(paint("WARNING", C.issue) + " migrated state is safe, but /root/sentry could not be removed automatically")
+    end if
+end if
+
+print("Scanning / without printing a filesystem tree ...")
+currentFilesystem = scanFilesystem
+stamp = "[" + current_date + "]"
+baseline = loadBaseline
+createdBaseline = false
+repairedBaseline = false
+startupChanges = {"added": 0, "deleted": 0, "modified": 0}
+
+if baseline["state"] == "missing" then
+    saved = saveBaseline(currentFilesystem["entries"], storage)
+    if saved["ok"] != 1 then
+        exit(paint("AUTOSENTRY ERROR", C.delete) + " first baseline was not committed: " + saved["reason"])
+    end if
+    createdBaseline = true
+    print(stamp + " " + paint("TRUSTED BASELINE CREATED", C.good) +
+        " | bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"])
+else if baseline["state"] == "invalid" then
+    print(paint("AUTOSENTRY ALERT", C.delete) + " saved baseline is invalid: " + baseline["reason"])
+    print("The current system was not trusted and the previous state was not overwritten.")
+    if mode != "accept" then exit("Run autosentry accept only after reviewing the machine and deciding to rebuild trust.")
+    answer = user_input("Type REBUILD to replace the invalid baseline with the current filesystem: ").trim.upper
+    if answer != "REBUILD" then exit(paint("Baseline unchanged.", C.issue))
+    saved = saveBaseline(currentFilesystem["entries"], storage)
+    if saved["ok"] != 1 then exit(paint("AUTOSENTRY ERROR", C.delete) + " baseline rebuild failed: " + saved["reason"])
+    print(paint("TRUSTED BASELINE REBUILT", C.good) +
+        " | bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"])
+    exit
+else
+    repair = repairInterleavedBaseline(baseline["entries_map"])
+    if repair["state"] == "mixed" or repair["state"] == "invalid" then
+        exit(paint("AUTOSENTRY ERROR", C.delete) +
+            " trusted baseline has a mixed or ambiguous pipe-encoding state; baseline preserved")
+    end if
+    if repair["state"] == "repairable" then
+        saved = saveBaseline(repair["entries"], storage)
+        if saved["ok"] != 1 then
+            exit(paint("AUTOSENTRY ERROR", C.delete) + " baseline encoding repair failed: " + saved["reason"])
+        end if
+        baseline = loadBaseline
+        if baseline["state"] != "ready" then
+            exit(paint("AUTOSENTRY ERROR", C.delete) + " repaired baseline did not verify")
+        end if
+        repairedBaseline = true
+        print(stamp + " " + paint("TRUSTED BASELINE ENCODING REPAIRED", C.good) +
+            " | entries=" + repair["count"] + " | bank=" + baseline["active"])
+    end if
+    print(stamp + " " + paint("TRUSTED BASELINE LOADED", C.good) +
+        " | saved=" + baseline["saved"] + " | bank=" + baseline["active"] +
+        " | shards=" + baseline["shards"] + " | items=" + baseline["entries"])
+    startupChanges = emitFilesystemChanges(baseline["entries_map"], currentFilesystem["entries"], stamp)
+    startupTotal = startupChanges["added"] + startupChanges["deleted"] + startupChanges["modified"]
+    if startupTotal == 0 then
+        print(stamp + " " + paint("PERSISTENT CHECK CLEAN", C.good) + " | no filesystem changes since the trusted baseline")
+    else
+        print(stamp + " " + paint("PERSISTENT CHANGES DETECTED", C.delete) +
+            " | added=" + startupChanges["added"] + " | deleted=" + startupChanges["deleted"] +
+            " | modified=" + startupChanges["modified"])
+        print(paint("Trusted baseline preserved. Review alerts; run autosentry accept only when known-safe.", C.issue))
+    end if
+end if
+
+print("  dirs=" + currentFilesystem["counts"]["dir"] +
+    " files=" + currentFilesystem["counts"]["file"] +
+    " binaries=" + currentFilesystem["counts"]["binary"] +
+    " links=" + currentFilesystem["counts"]["link"] +
+    " hidden=" + currentFilesystem["counts"]["hidden"] +
+    " unknown=" + currentFilesystem["counts"]["unknown"])
+
+if active_user != "root" then
+    print(paint("WARNING: not running as root; inaccessible items may be absent.", C.issue))
+end if
+if not currentFilesystem["symlink_api"] then
+    print(paint("WARNING: this runtime does not expose is_symlink; link safety/classification cannot be guaranteed.", C.issue))
+end if
+
+if mode == "accept" then
+    if createdBaseline then
+        print(paint("The first trusted baseline is ready; no second promotion was needed.", C.good))
+        exit
+    end if
+    startupTotal = startupChanges["added"] + startupChanges["deleted"] + startupChanges["modified"]
+    if startupTotal == 0 then
+        print(paint("Current filesystem already matches the trusted baseline.", C.good))
+        exit
+    end if
+    answer = user_input("Type ACCEPT to replace the trusted baseline with the current filesystem: ").trim.upper
+    if answer != "ACCEPT" then exit(paint("Baseline unchanged.", C.issue))
+    saved = saveBaseline(currentFilesystem["entries"], storage)
+    if saved["ok"] != 1 then exit(paint("AUTOSENTRY ERROR", C.delete) + " baseline promotion failed: " + saved["reason"])
+    print(paint("TRUSTED BASELINE PROMOTED", C.good) +
+        " | bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"])
+    exit
+end if
+
+if mode == "check" then
+    if not createdBaseline then print(paint("One-shot comparison complete. Trusted baseline unchanged.", C.cyan))
+    exit
+end if
+
+previousFilesystem = currentFilesystem
+previousProcessScan = scanProcesses
+previousProcesses = previousProcessScan["processes"]
+previousIssues = mergeIssues(previousFilesystem["issues"], previousProcessScan["issues"])
+if previousIssues.indexes.len > 0 then
+    issueNames = previousIssues.indexes
+    issueNames.sort
+    for issue in issueNames
+        print(stamp + " " + paint("SCAN ISSUE", C.issue) + " " + issue)
+    end for
+end if
+
+print(stamp + " " + paint("LIVE WATCH READY", C.good) +
+    " | items=" + filesystemTotal(previousFilesystem) +
+    " | processes=" + previousProcesses.indexes.len +
+    " | issues=" + previousIssues.indexes.len + " | delay=" + refresh + "s")
+print(paint("Watching now. Press Ctrl+C to stop.", C.title))
+
+quietScans = 0
+while true
+    // Yield every cycle. Scan time is additional to this delay.
+    wait(refresh)
+
+    currentFilesystem = scanFilesystem
+    currentProcessScan = scanProcesses
+    currentProcesses = currentProcessScan["processes"]
+    currentIssues = mergeIssues(currentFilesystem["issues"], currentProcessScan["issues"])
+    stamp = "[" + current_date + "]"
+
+    fsChanges = emitFilesystemChanges(previousFilesystem["entries"], currentFilesystem["entries"], stamp)
+    procChanges = emitProcessChanges(previousProcesses, currentProcesses, stamp)
+    issueChanges = emitIssueChanges(previousIssues, currentIssues, stamp)
+
+    eventCount = fsChanges["added"] + fsChanges["deleted"] + fsChanges["modified"]
+    eventCount = eventCount + procChanges["started"] + procChanges["stopped"] + procChanges["reused"]
+    eventCount = eventCount + issueChanges["opened"] + issueChanges["resolved"]
+
+    if eventCount > 0 then
+        quietScans = 0
+        print(stamp + " event summary | items=" + filesystemTotal(currentFilesystem) +
+            " processes=" + currentProcesses.indexes.len + " issues=" + currentIssues.indexes.len + " events=" + eventCount)
+    else
+        quietScans = quietScans + 1
+        if quietScans >= 30 then
+            print(stamp + " heartbeat | 30 quiet scans | items=" + filesystemTotal(currentFilesystem) +
+                " processes=" + currentProcesses.indexes.len + " issues=" + currentIssues.indexes.len)
+            quietScans = 0
+        end if
+    end if
+
+    // Replace, rather than append to, all retained live state each cycle.
+    previousFilesystem = currentFilesystem
+    previousProcesses = currentProcesses
+    previousIssues = currentIssues
+end while
