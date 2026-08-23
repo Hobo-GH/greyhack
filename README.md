@@ -97,14 +97,92 @@ This worker has been confirmed to launch and return records in Grey Hack. Howeve
 - A vulnerable PoisonLib can improve router-jump coverage, but the GitHub release does not bundle one.
 - MetaMail API output is controlled by Grey Hack. `fresh` cannot repair stale server/account mail data.
 
+# AutoTrash
 
-## FullTree
+AutoTrash is the Auto-family “I am not deleting all of that by hand” utility for Grey Hack. One command empties the conventional trash folders available to the active account while preserving every `.Trash` folder itself.
 
-FullTree is a read-only Grey Hack terminal utility that prints a detailed, sorted filesystem tree. It can scan from / or a chosen path, supports paged output for large directories, and displays symlinks without following them when supported by the runtime.
+```text
+autotrash
+autotrash preview
+autotrash --dry-run
+autotrash help
+```
 
-## Watchdog
+- Running as `root` cleans `/root/.Trash` and direct `/home/<account>/.Trash` folders.
+- Running as another account cleans only `/home/<active-user>/.Trash`.
+- `preview` and `--dry-run` list the top-level deletion targets without changing anything.
 
-Watchdog is a read-only, real-time Grey Hack system monitor. It builds an in-memory baseline of the full filesystem and running processes, then reports detected file additions, deletions, changes, process starts, stops, and PID reuse. It creates no config, log, or report files.
+AutoTrash does not accept a path argument and does not search `/` for every folder named `.Trash`. It validates the complete account scope before deleting, operates only on direct children of an approved trash root, uses Grey Hack's recursive folder deletion for nested trash folders, verifies the roots afterward, and reports anything left behind.
+
+The supplied `trashclean-0.1.0.src` prototype is preserved unchanged under `reference/original`. AutoTrash replaces its whole-filesystem scan, unconditional `is_symlink` dependency, versioned command name, and file-only deletion behavior with the bounded Auto-family implementation.
+
+ AutoSentry interaction
+
+AutoSentry will correctly report the removed trash contents as persistent deletions. Review those alerts and use `autosentry accept` only when the cleanup is known to be intentional and safe.
+
+AutoTrash is destructive by design. Use `preview` when there is anything in the trash you may want to recover.
+
+# AutoSentry
+
+AutoSentry is a persistent full-system integrity monitor for Grey Hack. It saves a trusted filesystem baseline beneath `/root/autoscripts/sentry`, compares the machine against that baseline whenever it starts, reports only what was added, deleted, or modified, and then continues watching filesystem and process activity live.
+
+Unlike the earlier Watchdog builds, AutoSentry can detect changes made while it was not running. It does not print a full filesystem tree. Dot-prefixed files and folders are included: a new or altered path such as `/root/.Trash/payload` is explicitly reported as `HIDDEN`.
+
+ Commands
+
+```text
+autosentry
+autosentry <refresh_seconds>
+autosentry check
+autosentry accept
+autosentry help
+autosentry -h
+autosentry --help
+```
+
+- `autosentry` compares the saved baseline, then begins live monitoring with a one-second delay.
+- `autosentry <refresh_seconds>` uses a custom live delay of at least 0.1 seconds.
+- `autosentry check` performs one persistent comparison and exits.
+- `autosentry accept` reviews current differences and requires the exact word `ACCEPT` before replacing the trusted state. If the saved baseline is damaged, the same command requires `REBUILD` instead.
+
+The first run creates the initial trusted baseline automatically. Later additions, deletions, and modifications are never trusted merely because AutoSentry observed them.
+
+ What it detects
+
+- Files and folders added or removed anywhere exposed by the File API
+- Readable text-content changes using MD5
+- Type, permissions, owner, group, size, binary-state, and symlink-target changes
+- Hidden dot-path changes
+- Live process starts, stops, and PID reuse
+- Filesystem and process enumeration problems
+
+Grey Hack does not expose binary contents through the current File API, so a same-path binary replacement is detectable only when exposed metadata also changes. Live polling can also miss an action that is created and fully reversed between two completed scans.
+
+ Baseline storage
+
+AutoSentry uses verified, sharded, double-bank storage:
+
+```text
+/root/autoscripts/sentry/
+├── index.txt
+├── baseline-a/
+│   └── shard-0001.txt
+└── baseline-b/
+    └── shard-0001.txt
+```
+
+It writes a complete new snapshot to the inactive bank, verifies every shard, and updates the index last. AutoSentry's own managed index and shard files are excluded from alerts; the state folders and unexpected files placed beside those shards are still monitored.
+
+If the earlier Sentry candidate created `/root/sentry`, run `/bin/autosentry` once. AutoSentry copies both banks and the index, verifies the migrated baseline, and only then removes the exact legacy managed structure. It refuses cleanup if unexpected data is present.
+
+ Stable release
+
+`1.0.0` is the field-verified stable release. It corrects both halves of the pipe-delimited state format: readers use the regex-safe `[|]` pattern, and the encoder escapes literal pipes without treating `|` as an empty regular-expression alternative. When it encounters the uniform character-by-character pipe corruption created by an earlier development build, it repairs only the trusted saved representation, verifies the rewritten bank, and then performs the real comparison. It never substitutes the current filesystem for the trusted baseline, and it refuses mixed or ambiguous corruption.
+
+The stable engine repaired and reloaded an existing 397-entry baseline in Grey Hack Public, reported a clean persistent comparison, entered live watch with zero scan issues, and then correctly reported hidden-file deletion and ordinary-file additions. The release source differs from the field-proven `1.0.0-dev5` source only in its displayed version label.
+
+AutoSentry `1.0.0` passes the Greybel build and the release pipe-safety checks. The supplied Watchdog, FullTree, and legacy Watchdog references remain preserved and unchanged.
+
 
 ## AutoAcademic 2.0.0
 
@@ -291,6 +369,10 @@ To prevent runaway scans, the script includes limits for:
 Despite its size, the script remains completely read-only.
 
 In short: Grey Hack’s original nmap tells you which ports are visible. Nmap Synthwave Deep Recon attempts to explain the entire observable network surrounding them.
+
+## FullTree
+
+FullTree is a read-only Grey Hack terminal utility that prints a detailed, sorted filesystem tree. It can scan from / or a chosen path, supports paged output for large directories, and displays symlinks without following them when supported by the runtime.
 
 ## Auto Tool Family
 
