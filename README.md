@@ -45,11 +45,27 @@ The development build scans unknown SSH libraries and adds what it learns to the
 - Failed exploitation can leave evidence on a candidate that AutoNet never controlled. The script reports that risk and cleans the execution server and its router before continuing.
 - Node credentials are stored in plaintext inside the game because AutoRoute Stage 2 needs unattended SSH reuse. Keep the AutoNet folder root-owned and do not publish its runtime shards.
 
-# AutoRoute
+## AutoRoute
 
-AutoRoute is the Auto Family's persistent Grey Hack route controller. Stage 1 builds and retains a trusted SSH chain through the player's owned servers. Stage 2 can extend that chain through randomly selected, verified root-SSH nodes collected by AutoNet, then collapse the temporary proxy layer back to the owned route with reverse-order cleanup.
+AutoRoute is the Auto Family's persistent Grey Hack route controller. It builds a trusted SSH chain through the player's owned servers, optionally extends that chain through verified root-SSH nodes collected by AutoNet, and collapses the temporary proxy layer in reverse order while replacing every retained computer log and every available router log.
 
-The canonical project folder remains `RouteGuard` so existing workspace references do not break. The script, terminal command, and current product name are `AutoRoute` and `autoroute`.
+AutoRoute 2.0.0 is a two-source release:
+
+- `autoroute-2.0.0.src` is the controller. It owns setup, connections, cleanup, terminal access, and commands.
+- `autoroute-proxy-helper-2.0.0.src` is the small companion staged beyond the owned route only when router cleanup is attempted. It contains no owned-route setup, saved SSH state, AutoNet records, interactive controller, or private escalation override.
+
+ Install
+
+Compile both release sources on the computer where AutoRoute starts:
+
+```text
+/bin/autoroute
+/bin/autoroute-proxy-helper
+```
+
+Run `autoroute` and enter each owned SSH hop in order. Passwords are masked during entry and never printed. The saved owned route and AutoNet node records necessarily contain reusable plaintext credentials inside root-owned in-game files so unattended SSH connections can work.
+
+The public controller leaves `HOME_ROUTER_PASSWORD = ""`. A private copy may fill that value to escalate a guest-only shell on the execution computer's physical router. Never publish a filled private copy. The controller remains confined to home and the trusted owned route; only the separate companion helper is copied to proxy nodes.
 
  Separate route stores
 
@@ -63,37 +79,39 @@ The canonical project folder remains `RouteGuard` so existing workspace referenc
 `-- ssh-0001.txt ...
 ```
 
-`owned-route.txt` contains only operator-entered, trusted infrastructure. AutoNet owns its node database on the final owned server. AutoRoute reads verified nodes from that database but never adds, edits, removes, or denies them. This prevents random proxy machines from contaminating the owned route.
+`owned-route.txt` contains operator-entered trusted infrastructure. AutoNet owns the isolated proxy-node database on the final owned server. AutoRoute reads verified nodes from that database but never adds, edits, removes, or denies them.
 
-SSH passwords are masked during setup and never printed. The saved owned route and AutoNet records must contain reusable plaintext credentials inside the game for unattended SSH connections.
+ Commands
 
- First run and Stage 1
-
-Compile the source as `/bin/autoroute`, run `autoroute`, and enter each owned SSH hop in order. AutoRoute saves the route, connects home to the final owned server, stages available computer and router cleanup objects, cleans behind itself as it advances, and opens a terminal on the current endpoint.
-
- Stage 2 commands
-
-- `nodes`: list the verified AutoNet nodes available on the final owned server. Passwords remain hidden.
-- `extend [count]`: choose random verified nodes and extend beyond the owned route. The default is 3 hops; the current ceiling is 12.
-- `collapse`: close the proxy layer from deepest to shallowest, replace every retained proxy computer log and available router log, then clean the owned route and return to its final server.
-- `clean`, `clog`, or `logs`: replace logs across every currently retained proxy and owned layer.
-- `open`: open another terminal on the current route endpoint.
-- `status`: show the owned route, active proxy hops, and cleanup-object readiness.
-- `rebuild`: collapse any proxy layer, clean, and reconnect the saved owned route.
-- `setup`: collapse, clean, and replace the saved owned route.
-- `quit`: perform final collapse and cleanup before closing AutoRoute.
+- `nodes` lists verified AutoNet proxy nodes without printing passwords.
+- `extend [count]` adds 1-12 randomly selected proxy hops; the default is 3.
+- `collapse` releases proxy hops deepest-first, performs final cleanup, and returns to the final owned server.
+- `clean`, `clog`, or `logs` replaces logs across every currently retained proxy and owned layer.
+- `open` opens another terminal at the current route endpoint.
+- `status` shows route state and computer/router cleaner readiness.
+- `rebuild` collapses, cleans, and reconnects the saved owned route.
+- `setup` collapses, cleans, and replaces the saved owned route.
+- `quit` performs final collapse and cleanup before closing AutoRoute.
 
  Cleanup boundary
 
-Every proxy computer must provide a usable cleanup object or AutoRoute refuses to retain it. Physical-router cleanup remains best effort and is reported separately. A later connection, terminal, or disconnect can create fresh evidence, so `collapse` performs its final proxy cleanup only after releasing each retained proxy shell.
+Every proxy computer must provide a usable cleanup object or AutoRoute refuses to retain it. Physical-router cleanup remains best effort and is reported separately. Later activity can create fresh evidence, so `collapse` releases each retained proxy shell before applying its final retained cleanup object.
 
 AutoRoute protects its route; it does not replace mission-target cleanup performed by AutoCred, AutoAcademic, AutoCorrupt, or another tool.
 
- Optional private home-router escalation
+ Verification
 
-The public source keeps `HOME_ROUTER_PASSWORD = ""`. A private copy may fill it to escalate a guest-only home-router shell and obtain a root-backed cleanup object. Never publish that private value.
+The Stage 2 engine completed a live five-node AutoNet extension, opened the fifth-node terminal, wiped the inspected fifth proxy's `/var/system.log`, collapsed nodes 5 through 1 with successful post-disconnect computer cleanup returns, cleaned home and both owned servers and routers, and restored the Server B terminal. All five physical proxy routers were explicitly reported as best effort.
 
-The current development candidate forwards its controller as the router-clean helper. A filled private build is therefore suitable only for Chris's accepted-risk personal testing until a password-free proxy helper is split out. Temporary helper copies are removed before final cleanup, but transient placement on an untrusted proxy is not equivalent to never exposing the private binary.
+The 2.0.0 release preserves that route and cleanup flow while splitting proxy-router work into the credential-free companion. Both stable sources pass Greybel build. The split-helper transport itself still needs one short in-game `extend 1` then `collapse` smoke run.
+
+ Release files
+
+- Public controller: `release/2.0.0/autoroute-2.0.0.src`
+- Public helper: `release/2.0.0/autoroute-proxy-helper-2.0.0.src`
+- Personal template: `personal/2.0.0/autoroute-2.0.0-personal.src`
+- Greybel builds: `build/2.0.0/`
+- Preserved field evidence: `tests/field/FIELD-RUN-2.0.0-dev1.md`
 
 
 ## AutoCred 2.2.0
