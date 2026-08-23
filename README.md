@@ -99,21 +99,6 @@ Every proxy computer must provide a usable cleanup object or AutoRoute refuses t
 
 AutoRoute protects its route; it does not replace mission-target cleanup performed by AutoCred, AutoAcademic, AutoCorrupt, or another tool.
 
- Verification
-
-The Stage 2 engine completed a live five-node AutoNet extension, opened the fifth-node terminal, wiped the inspected fifth proxy's `/var/system.log`, collapsed nodes 5 through 1 with successful post-disconnect computer cleanup returns, cleaned home and both owned servers and routers, and restored the Server B terminal. All five physical proxy routers were explicitly reported as best effort.
-
-The 2.0.0 release preserves that route and cleanup flow while splitting proxy-router work into the credential-free companion. Both stable sources pass Greybel build. The split-helper transport itself still needs one short in-game `extend 1` then `collapse` smoke run.
-
- Release files
-
-- Public controller: `release/2.0.0/autoroute-2.0.0.src`
-- Public helper: `release/2.0.0/autoroute-proxy-helper-2.0.0.src`
-- Personal template: `personal/2.0.0/autoroute-2.0.0-personal.src`
-- Greybel builds: `build/2.0.0/`
-- Preserved field evidence: `tests/field/FIELD-RUN-2.0.0-dev1.md`
-
-
 ## AutoCred 2.2.0
 
 AutoCred is a Grey Hack automation tool for classic **Credentials needed** Mission Contracts. It turns the normal credential-recovery workflow into one command, one masked MetaMail password/PIN prompt, and one job selection.
@@ -241,8 +226,7 @@ AutoTrash is destructive by design. Use `preview` when there is anything in the 
 # AutoSentry
 
 AutoSentry is a persistent full-system integrity monitor for Grey Hack. It saves a trusted filesystem baseline beneath `/root/autoscripts/sentry`, compares the machine against that baseline whenever it starts, reports only what was added, deleted, or modified, and then continues watching filesystem and process activity live.
-
-Unlike the earlier Watchdog builds, AutoSentry can detect changes made while it was not running. It does not print a full filesystem tree. Dot-prefixed files and folders are included: a new or altered path such as `/root/.Trash/payload` is explicitly reported as `HIDDEN`.
+AutoSentry can detect changes made while it was not running. It does not print a full filesystem tree. Dot-prefixed files and folders are included: a new or altered path such as `/root/.Trash/payload` is explicitly reported as `HIDDEN`.
 
  Commands
 
@@ -290,12 +274,6 @@ AutoSentry uses verified, sharded, double-bank storage:
 It writes a complete new snapshot to the inactive bank, verifies every shard, and updates the index last. AutoSentry's own managed index and shard files are excluded from alerts; the state folders and unexpected files placed beside those shards are still monitored.
 
 If the earlier Sentry candidate created `/root/sentry`, run `/bin/autosentry` once. AutoSentry copies both banks and the index, verifies the migrated baseline, and only then removes the exact legacy managed structure. It refuses cleanup if unexpected data is present.
-
- Stable release
-
-`1.0.0` is the field-verified stable release. It corrects both halves of the pipe-delimited state format: readers use the regex-safe `[|]` pattern, and the encoder escapes literal pipes without treating `|` as an empty regular-expression alternative. When it encounters the uniform character-by-character pipe corruption created by an earlier development build, it repairs only the trusted saved representation, verifies the rewritten bank, and then performs the real comparison. It never substitutes the current filesystem for the trusted baseline, and it refuses mixed or ambiguous corruption.
-
-The stable engine repaired and reloaded an existing 397-entry baseline in Grey Hack Public, reported a clean persistent comparison, entered live watch with zero scan issues, and then correctly reported hidden-file deletion and ordinary-file additions. The release source differs from the field-proven `1.0.0-dev5` source only in its displayed version label.
 
 AutoSentry `1.0.0` passes the Greybel build and the release pipe-safety checks. The supplied Watchdog, FullTree, and legacy Watchdog references remain preserved and unchanged.
 
