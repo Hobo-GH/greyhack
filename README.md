@@ -1,3 +1,9 @@
+## GREY HACK THE GAME
+Grey Hack / GreyScript Project
+This repository contains scripts written exclusively for the video game Grey Hack and its GreyScript runtime. All computers, networks, credentials, exploits, routers, shells, and other targets referenced by these programs are simulated objects within the game. These programs are not designed to target or interact with real-world computer systems or networks.
+Target game version: Grey Hack Public v0.9.6773
+
+
 ## AutoNet
 
 AutoNet is the SSH recruiter for the Auto script family. Run it from the final owned server opened by AutoRoute. It searches random public routers for SSH services, uses the shared vulnerability database, proves that the recovered root password works through a fresh SSH login, requires target-computer and owned execution-route cleanup, and then saves the machine as a reusable proxy node. Target-router cleanup is attempted and recorded but is no longer allowed to discard an otherwise verified node when the owned execution-route chain break is clean.
