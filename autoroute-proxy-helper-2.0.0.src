@@ -1,0 +1,160 @@
+//Made By Hobo
+// AutoRoute proxy-router cleanup helper 2.0.0 for Grey Hack Public v0.9.6773.
+//
+// This companion contains no owned-route setup, saved SSH state, AutoNet node
+// records, terminal controller, or private escalation override. Compile it as
+// /bin/autoroute-proxy-helper beside /bin/autoroute.
+
+SCRIPT_VERSION = "2.0.0"
+
+
+is_file = function(value)
+    return typeof(value).lower == "file"
+end function
+
+
+is_shell = function(value)
+    return typeof(value).lower == "shell"
+end function
+
+
+is_computer = function(value)
+    return typeof(value).lower == "computer"
+end function
+
+
+root_from_value = function(value)
+    if is_shell(value) then return value.host_computer.File("/")
+    if is_computer(value) then return value.File("/")
+    if is_file(value) then
+        current = value
+        while current.parent
+            current = current.parent
+        end while
+        return current
+    end if
+    return null
+end function
+
+
+child_named = function(folder, name)
+    if not is_file(folder) then return null
+    if not folder.is_folder then return null
+    folders = folder.get_folders
+    if typeof(folders).lower == "list" then
+        for child in folders
+            if child.name == name then return child
+        end for
+    end if
+    files = folder.get_files
+    if typeof(files).lower == "list" then
+        for child in files
+            if child.name == name then return child
+        end for
+    end if
+    return null
+end function
+
+
+file_from_root = function(root, path)
+    if not is_file(root) then return null
+    current = root
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        current = child_named(current, part)
+        if not is_file(current) then return null
+    end for
+    return current
+end function
+
+
+scrub_source_from_value = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return null
+    for path in ["/var/silentclean", "/etc/fstab", "/etc/xorg.conf"]
+        candidate = file_from_root(root, path)
+        if not is_file(candidate) then continue
+        if candidate.is_folder then continue
+        if candidate.is_binary then continue
+        if candidate.has_permission("r") then return candidate
+    end for
+    etc = file_from_root(root, "/etc")
+    if not is_file(etc) then return null
+    files = etc.get_files
+    if typeof(files).lower != "list" then return null
+    for candidate in files
+        if candidate.is_folder then continue
+        if candidate.is_binary then continue
+        if candidate.has_permission("r") then return candidate
+    end for
+    return null
+end function
+
+
+log_writable_from_value = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return false
+    log_file = file_from_root(root, "/var/system.log")
+    if not is_file(log_file) then return false
+    return log_file.has_permission("w")
+end function
+
+
+unsafe_checks = function(provider, meta_lib, region)
+    checks = []
+    scan_text = provider.scan_address(meta_lib, region)
+    if typeof(scan_text).lower != "string" then return checks
+    pieces = scan_text.split("Unsafe check: ")
+    if pieces.len < 2 then return checks
+    for piece in pieces[1:]
+        start = piece.indexOf("<b>")
+        finish = piece.indexOf("</b>")
+        if start == null or finish == null then continue
+        if finish <= start + 3 then continue
+        unsafe = piece[start + 3:finish].replace(char(10), "").trim
+        if unsafe != "" and checks.indexOf(unsafe) == null then checks.push(unsafe)
+    end for
+    return checks
+end function
+
+
+stage_router_source = function()
+    router = get_router
+    if typeof(router).lower != "router" then return null
+    provider = include_lib("/lib/metaxploit.so")
+    if typeof(provider).lower != "metaxploitlib" then return null
+    session = provider.net_use(router.public_ip, 0)
+    if typeof(session).lower != "netsession" then return null
+    meta_lib = session.dump_lib
+    if typeof(meta_lib).lower != "metalib" then return null
+    regions = provider.scan(meta_lib)
+    if typeof(regions).lower != "list" then return null
+
+    for region in regions
+        for unsafe in unsafe_checks(provider, meta_lib, region)
+            result = meta_lib.overflow(region, unsafe, router.local_ip)
+            source = scrub_source_from_value(result)
+            if is_file(source) and log_writable_from_value(result) then return source
+            result = meta_lib.overflow(region, unsafe)
+            source = scrub_source_from_value(result)
+            if is_file(source) and log_writable_from_value(result) then return source
+        end for
+    end for
+    return null
+end function
+
+
+if params.len == 0 or params[0] != "--router-clean-helper" then exit
+
+bridge = get_custom_object
+bridge.rg_router_source = null
+bridge.rg_helper_status = "running"
+source = stage_router_source
+if is_file(source) then
+    bridge.rg_router_source = source
+    bridge.rg_helper_status = "ready"
+else
+    bridge.rg_helper_status = "no-router-clean-object"
+end if
+exit

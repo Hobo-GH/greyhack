@@ -1,0 +1,1092 @@
+//Made By Hobo
+// AutoRoute 2.0.0 owned-route and AutoNet proxy controller for Grey Hack Public v0.9.6773.
+//
+// First run asks for an ordered SSH route and saves it outside the source.
+// AutoRoute keeps that trusted chain separate from the verified AutoNet node
+// database, then optionally extends and collapses a temporary proxy layer.
+
+SCRIPT_VERSION = "2.0.0"
+
+AUTOSCRIPTS_ROOT = "/root/autoscripts"
+NETWORK_ROOT = "/root/autoscripts/network"
+NETWORK_INDEX_PATH = "/root/autoscripts/network/index.txt"
+OWNED_ROUTE_PATH = "/root/autoscripts/network/owned-route.txt"
+AUTONET_NODE_ROOT = "/root/autoscripts/autonet/nodes"
+AUTONET_NODE_INDEX_PATH = "/root/autoscripts/autonet/nodes/index.txt"
+AUTONET_NODE_INDEX_HEADER = "ANNODEINDEX1"
+AUTONET_NODE_SHARD_HEADER = "ANNODES1"
+AUTONET_NODE_SHARD_PREFIX = "ssh-"
+NETWORK_INDEX_HEADER = "ASNETINDEX1"
+ROUTE_HEADER = "ASOWNED1"
+MAX_HOPS = 8
+DEFAULT_HOPS = 2
+MAX_PROXY_HOPS = 12
+DEFAULT_PROXY_HOPS = 3
+DEFAULT_SSH_PORT = 22
+HELPER_WAIT_SECONDS = 60
+FINALIZER_WAIT_SECONDS = 2
+
+// Compile the companion source as /bin/autoroute-proxy-helper. AutoRoute sends
+// only that credential-free helper beyond the final owned server. The private
+// controller remains confined to the home computer and trusted owned route.
+PROXY_HELPER_SOURCE = "/bin/autoroute-proxy-helper"
+
+// PRIVATE OPTIONAL OVERRIDE.
+// Leave blank in every public/GitHub copy. In a private copy, enter the root
+// password of the execution computer's physical router. AutoRoute uses it
+// only when the router exploit returns a guest shell that cannot write the log.
+HOME_ROUTER_PASSWORD = ""
+
+COLOR_PURPLE = "#D86CFF"
+COLOR_CYAN = "#55E7FF"
+COLOR_GREEN = "#63FF9B"
+COLOR_RED = "#FF5C7C"
+COLOR_ORANGE = "#FFB86B"
+COLOR_PINK = "#FF79C6"
+
+
+paint = function(value, color)
+    return "<color=" + color + ">" + str(value) + "</color>"
+end function
+
+
+is_file = function(value)
+    return typeof(value).lower == "file"
+end function
+
+
+is_shell = function(value)
+    return typeof(value).lower == "shell"
+end function
+
+
+is_computer = function(value)
+    return typeof(value).lower == "computer"
+end function
+
+
+join_path = function(folder, name)
+    if folder == "/" then return "/" + name
+    if folder[-1] == "/" then return folder + name
+    return folder + "/" + name
+end function
+
+
+ensure_folder_path = function(path)
+    computer = globals.local_computer
+    current = "/"
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        next_path = join_path(current, part)
+        item = computer.File(next_path)
+        if is_file(item) then
+            if not item.is_folder then return null
+        else
+            if computer.create_folder(current, part) != 1 then return null
+            item = computer.File(next_path)
+            if not is_file(item) then return null
+        end if
+        current = next_path
+    end for
+    return computer.File(path)
+end function
+
+
+ensure_network_layout = function()
+    network = ensure_folder_path(NETWORK_ROOT)
+    if not is_file(network) then return false
+    index = globals.local_computer.File(NETWORK_INDEX_PATH)
+    if not is_file(index) then
+        if globals.local_computer.touch(NETWORK_ROOT, "index.txt") != 1 then return false
+        index = globals.local_computer.File(NETWORK_INDEX_PATH)
+        if not is_file(index) then return false
+        lines = [NETWORK_INDEX_HEADER, "O|owned-route.txt"]
+        if index.set_content(lines.join(char(10))) != 1 then return false
+    end if
+    return true
+end function
+
+
+route_file = function(create = false)
+    file = globals.local_computer.File(OWNED_ROUTE_PATH)
+    if is_file(file) then return file
+    if not create then return null
+    if not ensure_network_layout then return null
+    if globals.local_computer.touch(NETWORK_ROOT, "owned-route.txt") != 1 then return null
+    return globals.local_computer.File(OWNED_ROUTE_PATH)
+end function
+
+
+safe_field = function(value)
+    if typeof(value).lower != "string" then return false
+    if value.indexOf("|") != null then return false
+    if value.indexOf(char(10)) != null then return false
+    if value.indexOf(char(13)) != null then return false
+    return true
+end function
+
+
+prompt_nonempty = function(label, hidden = false, fallback = "")
+    while true
+        if hidden then value = user_input(label, 1) else value = user_input(label)
+        value = value.trim
+        if value == "" and fallback != "" then value = fallback
+        if value != "" and safe_field(value) then return value
+        print(paint("A value is required; the | character is not allowed.", COLOR_RED))
+    end while
+end function
+
+
+setup_route = function()
+    print(paint("AutoRoute first-run owned-route setup", COLOR_PURPLE))
+    print("The owned route is saved at " + paint(OWNED_ROUTE_PATH, COLOR_CYAN) + ".")
+    print("Passwords are masked while entered and never printed afterward.")
+
+    count_text = user_input("SSH hop count [" + DEFAULT_HOPS + "]: ").trim
+    if count_text == "" then count = DEFAULT_HOPS else count = count_text.to_int
+    if typeof(count).lower != "number" then return null
+    if count < 1 or count > MAX_HOPS then
+        print(paint("Hop count must be between 1 and " + MAX_HOPS + ".", COLOR_RED))
+        return null
+    end if
+
+    hops = []
+    number = 1
+    while number <= count
+        print(char(10) + paint("SSH hop " + number + " of " + count, COLOR_PURPLE))
+        alias = prompt_nonempty("Alias [hop" + number + "]: ", false, "hop" + number)
+        ip = ""
+        while ip == ""
+            candidate = prompt_nonempty("Public IP: ")
+            if is_valid_ip(candidate) then
+                ip = candidate
+            else
+                print(paint("That is not a valid IP address.", COLOR_RED))
+            end if
+        end while
+
+        port_text = user_input("SSH port [" + DEFAULT_SSH_PORT + "]: ").trim
+        if port_text == "" then port = DEFAULT_SSH_PORT else port = port_text.to_int
+        if typeof(port).lower != "number" or port < 1 or port > 65535 then
+            print(paint("Invalid SSH port.", COLOR_RED))
+            return null
+        end if
+
+        user = prompt_nonempty("SSH user [root]: ", false, "root")
+        password = prompt_nonempty("SSH password: ", true)
+        hops.push({"alias": alias, "ip": ip, "port": port, "user": user, "password": password})
+        number = number + 1
+    end while
+
+    lines = [ROUTE_HEADER]
+    for hop in hops
+        lines.push("H|" + hop.alias + "|" + hop.ip + "|" + hop.port + "|" + hop.user + "|" + hop.password)
+    end for
+    file = route_file(true)
+    if not is_file(file) then return null
+    if file.set_content(lines.join(char(10))) != 1 then return null
+    print(char(10) + paint("Route saved: ", COLOR_GREEN) + paint(hops.len + " hop(s)", COLOR_CYAN))
+    return hops
+end function
+
+
+load_route = function()
+    file = route_file
+    if not is_file(file) then return null
+    if file.is_binary then return null
+    content = file.get_content
+    if typeof(content).lower != "string" then return null
+    lines = content.replace(char(13), "").split(char(10))
+    if lines.len < 2 then return null
+    if lines[0].trim != ROUTE_HEADER then return null
+    hops = []
+    for line in lines[1:]
+        parts = line.trim.split("[|]")
+        if parts.len < 6 then continue
+        if parts[0] != "H" then continue
+        port = parts[3].to_int
+        if not is_valid_ip(parts[2]) then continue
+        if typeof(port).lower != "number" or port < 1 or port > 65535 then continue
+        if parts[1] == "" or parts[4] == "" or parts[5] == "" then continue
+        hops.push({"alias": parts[1], "ip": parts[2], "port": port,
+            "user": parts[4], "password": parts[5]})
+    end for
+    if hops.len == 0 or hops.len > MAX_HOPS then return null
+    return hops
+end function
+
+
+show_route = function(hops)
+    print(paint("Configured route", COLOR_PURPLE))
+    number = 1
+    for hop in hops
+        print("  " + paint(number, COLOR_PINK) + "  " + paint(hop.alias, COLOR_GREEN) +
+            "  " + paint(hop.user + "@" + hop.ip + ":" + hop.port, COLOR_CYAN))
+        number = number + 1
+    end for
+end function
+
+
+digits_only = function(value)
+    text = str(value)
+    if text == "" then return false
+    for character in text
+        if character < "0" or character > "9" then return false
+    end for
+    return true
+end function
+
+
+pad4 = function(value)
+    text = str(value)
+    while text.len < 4
+        text = "0" + text
+    end while
+    return text
+end function
+
+
+autonet_shard_name = function(number)
+    return AUTONET_NODE_SHARD_PREFIX + pad4(number) + ".txt"
+end function
+
+
+load_autonet_nodes = function(base_shell)
+    nodes = []
+    if not is_shell(base_shell) then return nodes
+    computer = base_shell.host_computer
+    if not is_computer(computer) then return nodes
+    folder = computer.File(AUTONET_NODE_ROOT)
+    if not is_file(folder) or not folder.is_folder then return nodes
+
+    shard_count = 0
+    index = computer.File(AUTONET_NODE_INDEX_PATH)
+    if is_file(index) and not index.is_folder and not index.is_binary then
+        content = index.get_content
+        if typeof(content).lower == "string" then
+            lines = content.replace(char(13), "").split(char(10))
+            if lines.len > 0 and lines[0].trim == AUTONET_NODE_INDEX_HEADER then
+                for line in lines[1:]
+                    parts = line.trim.split("[|]")
+                    if parts.len == 2 and parts[0] == "S" and digits_only(parts[1]) then
+                        shard_count = parts[1].to_int
+                    end if
+                end for
+            end if
+        end if
+    end if
+
+    names = []
+    if shard_count > 0 then
+        number = 1
+        while number <= shard_count
+            names.push(autonet_shard_name(number))
+            number = number + 1
+        end while
+    else
+        files = folder.get_files
+        if typeof(files).lower == "list" then
+            for file in files
+                if file.name.indexOf(AUTONET_NODE_SHARD_PREFIX) == 0 then names.push(file.name)
+            end for
+        end if
+    end if
+
+    blocked = {}
+    blocked[globals.local_computer.public_ip] = 1
+    for hop in globals.hops
+        blocked[hop.ip] = 1
+    end for
+    seen = {}
+    for name in names
+        file = computer.File(join_path(AUTONET_NODE_ROOT, name))
+        if not is_file(file) or file.is_folder or file.is_binary then continue
+        content = file.get_content
+        if typeof(content).lower != "string" then continue
+        lines = content.replace(char(13), "").split(char(10))
+        if lines.len == 0 or lines[0].trim != AUTONET_NODE_SHARD_HEADER then continue
+        for line in lines[1:]
+            parts = line.trim.split("[|]")
+            if parts.len < 11 or parts[0] != "N" then continue
+            port = parts[3].to_int
+            if not is_valid_ip(parts[2]) or blocked.hasIndex(parts[2]) then continue
+            if typeof(port).lower != "number" or port < 1 or port > 65535 then continue
+            if parts[4] != "root" or parts[5] == "" or not safe_field(parts[5]) then continue
+            if parts[8] != "yes" then continue
+            key = parts[2] + ":" + port
+            if seen.hasIndex(key) then continue
+            seen[key] = 1
+            nodes.push({"id": parts[1], "ip": parts[2], "port": port,
+                "user": parts[4], "password": parts[5], "lan": parts[6],
+                "verified": parts[7], "computer_clean": parts[8],
+                "router_clean": parts[9], "source": parts[10]})
+        end for
+    end for
+    return nodes
+end function
+
+
+show_autonet_nodes = function()
+    if globals.shells.len < 2 then
+        print(paint("The owned route is not ready.", COLOR_RED))
+        return
+    end if
+    nodes = load_autonet_nodes(globals.shells[-1])
+    print(paint("AutoNet proxy pool", COLOR_PURPLE))
+    if nodes.len == 0 then
+        print(paint("No verified AutoNet nodes are available on the final owned server.", COLOR_ORANGE))
+        return
+    end if
+    index = 0
+    for node in nodes
+        router_color = COLOR_RED
+        if node.router_clean == "yes" then router_color = COLOR_GREEN
+        print("  " + paint("[" + index + "]", COLOR_PINK) + " " +
+            paint(node.ip + ":" + node.port, COLOR_CYAN) + " root  verified=" +
+            node.verified + "  prior-router-clean=" + paint(node.router_clean, router_color))
+        index = index + 1
+    end for
+    print("Available nodes: " + paint(nodes.len, COLOR_GREEN) + "  passwords remain hidden")
+end function
+
+
+select_proxy_nodes = function(nodes, count)
+    selected = []
+    pool = nodes[:]
+    while selected.len < count and pool.len > 0
+        index = floor(rnd * pool.len)
+        selected.push(pool[index])
+        pool.remove(index)
+    end while
+    return selected
+end function
+
+
+root_from_value = function(value)
+    if is_shell(value) then return value.host_computer.File("/")
+    if is_computer(value) then return value.File("/")
+    if is_file(value) then
+        current = value
+        while current.parent
+            current = current.parent
+        end while
+        return current
+    end if
+    return null
+end function
+
+
+child_named = function(folder, name)
+    if not is_file(folder) then return null
+    if not folder.is_folder then return null
+    folders = folder.get_folders
+    if typeof(folders).lower == "list" then
+        for child in folders
+            if child.name == name then return child
+        end for
+    end if
+    files = folder.get_files
+    if typeof(files).lower == "list" then
+        for child in files
+            if child.name == name then return child
+        end for
+    end if
+    return null
+end function
+
+
+file_from_root = function(root, path)
+    if not is_file(root) then return null
+    current = root
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        current = child_named(current, part)
+        if not is_file(current) then return null
+    end for
+    return current
+end function
+
+
+scrub_source_from_value = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return null
+    for path in ["/var/silentclean", "/etc/fstab", "/etc/xorg.conf"]
+        candidate = file_from_root(root, path)
+        if not is_file(candidate) then continue
+        if candidate.is_folder then continue
+        if candidate.is_binary then continue
+        if candidate.has_permission("r") then return candidate
+    end for
+    etc = file_from_root(root, "/etc")
+    if not is_file(etc) then return null
+    files = etc.get_files
+    if typeof(files).lower != "list" then return null
+    for candidate in files
+        if candidate.is_folder then continue
+        if candidate.is_binary then continue
+        if candidate.has_permission("r") then return candidate
+    end for
+    return null
+end function
+
+
+log_writable_from_value = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return false
+    log_file = file_from_root(root, "/var/system.log")
+    if not is_file(log_file) then return false
+    return log_file.has_permission("w")
+end function
+
+
+clean_source = function(source)
+    if not is_file(source) then return false
+    copied = source.copy("/var", "system.log")
+    return copied == 1
+end function
+
+
+clean_value = function(value)
+    return clean_source(scrub_source_from_value(value))
+end function
+
+
+unsafe_checks = function(provider, meta_lib, region)
+    checks = []
+    scan_text = provider.scan_address(meta_lib, region)
+    if typeof(scan_text).lower != "string" then return checks
+    pieces = scan_text.split("Unsafe check: ")
+    if pieces.len < 2 then return checks
+    for piece in pieces[1:]
+        start = piece.indexOf("<b>")
+        finish = piece.indexOf("</b>")
+        if start == null or finish == null then continue
+        if finish <= start + 3 then continue
+        unsafe = piece[start + 3:finish].replace(char(10), "").trim
+        if unsafe != "" and checks.indexOf(unsafe) == null then checks.push(unsafe)
+    end for
+    return checks
+end function
+
+
+stage_local_router_source = function()
+    globals.last_router_shell = null
+    router = get_router
+    if typeof(router).lower != "router" then return null
+    provider = include_lib("/lib/metaxploit.so")
+    if typeof(provider).lower != "metaxploitlib" then return null
+    session = provider.net_use(router.public_ip, 0)
+    if typeof(session).lower != "netsession" then return null
+    meta_lib = session.dump_lib
+    if typeof(meta_lib).lower != "metalib" then return null
+    regions = provider.scan(meta_lib)
+    if typeof(regions).lower != "list" then return null
+
+    for region in regions
+        for unsafe in unsafe_checks(provider, meta_lib, region)
+            result = meta_lib.overflow(region, unsafe, router.local_ip)
+            if is_shell(result) and not is_shell(globals.last_router_shell) then globals.last_router_shell = result
+            source = scrub_source_from_value(result)
+            if is_file(source) and log_writable_from_value(result) then return source
+            result = meta_lib.overflow(region, unsafe)
+            if is_shell(result) and not is_shell(globals.last_router_shell) then globals.last_router_shell = result
+            source = scrub_source_from_value(result)
+            if is_file(source) and log_writable_from_value(result) then return source
+        end for
+    end for
+    return null
+end function
+
+
+root_helper_mode = function()
+    bridge = get_custom_object
+    bridge.rg_router_source = null
+    bridge.rg_helper_status = "root-running"
+    password = bridge.rg_router_password
+    bridge.rg_router_password = ""
+    if typeof(password).lower != "string" or password == "" then
+        bridge.rg_helper_status = "missing-router-password"
+        exit
+    end if
+    root_shell = get_shell("root", password)
+    password = ""
+    if not is_shell(root_shell) then
+        bridge.rg_helper_status = "router-root-login-failed"
+        exit
+    end if
+    source = scrub_source_from_value(root_shell)
+    if is_file(source) and log_writable_from_value(root_shell) then
+        bridge.rg_router_source = source
+        bridge.rg_helper_status = "root-ready"
+    else
+        bridge.rg_helper_status = "router-root-log-unavailable"
+    end if
+    exit
+end function
+
+
+helper_mode = function()
+    bridge = get_custom_object
+    bridge.rg_router_source = null
+    bridge.rg_helper_status = "running"
+    source = stage_local_router_source
+    if is_file(source) then
+        bridge.rg_router_source = source
+        bridge.rg_helper_status = "ready"
+    else
+        bridge.rg_helper_status = "no-router-clean-object"
+    end if
+    exit
+end function
+
+
+writable_folder = function(shell)
+    if not is_shell(shell) then return null
+    computer = shell.host_computer
+    root = computer.File("/root")
+    if is_file(root) and root.has_permission("w") and root.has_permission("x") then return root
+    homes = computer.File("/home")
+    if not is_file(homes) then return null
+    folders = homes.get_folders
+    if typeof(folders).lower != "list" then return null
+    for folder in folders
+        if folder.has_permission("w") and folder.has_permission("x") then return folder
+    end for
+    return null
+end function
+
+
+deploy_helper = function(source_shell, source_path, remote_shell)
+    work = writable_folder(remote_shell)
+    if not is_file(work) then return ""
+    source_file = source_shell.host_computer.File(source_path)
+    if not is_file(source_file) then return ""
+    copied = source_shell.scp(source_path, work.path, remote_shell)
+    remote_path = join_path(work.path, source_file.name)
+    if not is_file(remote_shell.host_computer.File(remote_path)) then return ""
+    return remote_path
+end function
+
+
+stage_remote_router_source = function(remote_shell, helper_path)
+    if not is_shell(remote_shell) then return null
+    if helper_path == "" then return null
+    bridge = get_custom_object
+    bridge.rg_router_source = null
+    bridge.rg_helper_status = "waiting"
+    remote_shell.launch(helper_path, "--router-clean-helper")
+    waited = 0
+    while waited < HELPER_WAIT_SECONDS
+        if bridge.rg_helper_status != "waiting" and bridge.rg_helper_status != "running" then break
+        wait(0.2)
+        waited = waited + 0.2
+    end while
+    source = bridge.rg_router_source
+    bridge.rg_router_source = null
+    if is_file(source) then return source
+    return null
+end function
+
+
+stage_router_root_source = function(guest_shell, password)
+    if not is_shell(guest_shell) then return null
+    if typeof(password).lower != "string" or password == "" then return null
+    helper_path = deploy_helper(globals.local_shell, program_path, guest_shell)
+    if helper_path == "" then return null
+    bridge = get_custom_object
+    bridge.rg_router_source = null
+    bridge.rg_router_password = password
+    bridge.rg_helper_status = "waiting"
+    guest_shell.launch(helper_path, "--router-root-helper")
+    waited = 0
+    while waited < HELPER_WAIT_SECONDS
+        if bridge.rg_helper_status != "waiting" and bridge.rg_helper_status != "root-running" then break
+        wait(0.2)
+        waited = waited + 0.2
+    end while
+    bridge.rg_router_password = ""
+    source = bridge.rg_router_source
+    bridge.rg_router_source = null
+
+    // The private controller binary contains HOME_ROUTER_PASSWORD. Remove the
+    // guest-access router copy before the final log replacement.
+    helper_file = guest_shell.host_computer.File(helper_path)
+    if is_file(helper_file) then helper_file.delete
+    if is_file(source) then return source
+    return null
+end function
+
+
+stage_computer_source = function(shell)
+    if not is_shell(shell) then return null
+    source = scrub_source_from_value(shell)
+    if not is_file(source) or not log_writable_from_value(shell) then return null
+    return source
+end function
+
+
+delete_remote_helper = function(shell, path)
+    if not is_shell(shell) or typeof(path).lower != "string" or path == "" then return
+    file = shell.host_computer.File(path)
+    if is_file(file) then file.delete
+end function
+
+
+reset_proxy_objects = function()
+    globals.proxy_nodes = []
+    globals.proxy_shells = []
+    globals.proxy_computer_sources = []
+    globals.proxy_router_sources = []
+    globals.proxy_helper_paths = []
+    globals.proxy_seed_helper_path = ""
+end function
+
+
+remove_proxy_seed_helper = function()
+    if globals.proxy_seed_helper_path == "" then return
+    if globals.shells.len > 0 then
+        delete_remote_helper(globals.shells[-1], globals.proxy_seed_helper_path)
+    end if
+    globals.proxy_seed_helper_path = ""
+end function
+
+
+stage_proxy_helper_seed = function()
+    if globals.shells.len < 2 then return ""
+    helper = globals.local_computer.File(PROXY_HELPER_SOURCE)
+    if not is_file(helper) or helper.is_folder then
+        print(paint("Proxy helper missing: " + PROXY_HELPER_SOURCE, COLOR_RED))
+        print(paint("Compile autoroute-proxy-helper before using extend.", COLOR_ORANGE))
+        return ""
+    end if
+
+    source_shell = globals.local_shell
+    source_path = PROXY_HELPER_SOURCE
+    staged_shell = null
+    staged_path = ""
+    index = 1
+    while index < globals.shells.len
+        remote_shell = globals.shells[index]
+        next_path = deploy_helper(source_shell, source_path, remote_shell)
+        if next_path == "" then
+            delete_remote_helper(staged_shell, staged_path)
+            print(paint("Could not stage the proxy helper on the owned route.", COLOR_RED))
+            return ""
+        end if
+        delete_remote_helper(staged_shell, staged_path)
+        staged_shell = remote_shell
+        staged_path = next_path
+        source_shell = remote_shell
+        source_path = next_path
+        index = index + 1
+    end while
+    return staged_path
+end function
+
+
+proxy_shell_valid = function(shell, node)
+    if not is_shell(shell) then return false
+    computer = shell.host_computer
+    if not is_computer(computer) or computer.public_ip != node.ip then return false
+    root = computer.File("/root")
+    if not is_file(root) or not root.is_folder then return false
+    if not root.has_permission("r") or not root.has_permission("w") then return false
+    return root.has_permission("x")
+end function
+
+
+clean_proxy_stage = function(index)
+    if index < 0 or index >= globals.proxy_nodes.len then return false
+    node = globals.proxy_nodes[index]
+    computer_ok = false
+    router_ok = false
+    if index < globals.proxy_computer_sources.len then
+        computer_ok = clean_source(globals.proxy_computer_sources[index])
+    end if
+    if index < globals.proxy_router_sources.len then
+        router_ok = clean_source(globals.proxy_router_sources[index])
+    end if
+    computer_color = COLOR_RED
+    router_color = COLOR_RED
+    if computer_ok then computer_color = COLOR_GREEN
+    if router_ok then router_color = COLOR_GREEN
+    print("  " + paint("proxy " + (index + 1), COLOR_PINK) + " " +
+        paint(node.ip, COLOR_CYAN) + "  computer=" +
+        paint(["FAIL", "clean"][computer_ok], computer_color) + "  router=" +
+        paint(["best-effort", "clean"][router_ok], router_color))
+    return computer_ok and router_ok
+end function
+
+
+clean_proxy_all = function()
+    if globals.proxy_nodes.len == 0 then return true
+    print(paint("Proxy-layer cleanup", COLOR_ORANGE))
+    all_ok = true
+    index = globals.proxy_nodes.len - 1
+    while index >= 0
+        if not clean_proxy_stage(index) then all_ok = false
+        index = index - 1
+    end while
+    if all_ok then
+        print(paint("Proxy-layer computer and router logs replaced.", COLOR_GREEN))
+    else
+        print(paint("Proxy computers were required; unavailable routers remain best-effort risk.", COLOR_ORANGE))
+    end if
+    return all_ok
+end function
+
+
+collapse_proxy = function()
+    if globals.proxy_nodes.len == 0 then
+        print(paint("Already on the owned route.", COLOR_CYAN))
+        return clean_all
+    end if
+    print(paint("Collapsing proxy layer", COLOR_ORANGE))
+    proxy_ok = true
+    index = globals.proxy_nodes.len - 1
+    while index >= 0
+        if index < globals.proxy_helper_paths.len then
+            delete_remote_helper(globals.proxy_shells[index], globals.proxy_helper_paths[index])
+        end if
+        globals.proxy_shells[index] = null
+        wait(FINALIZER_WAIT_SECONDS)
+        if not clean_proxy_stage(index) then proxy_ok = false
+        index = index - 1
+    end while
+    reset_proxy_objects
+    owned_ok = clean_all
+    if proxy_ok and owned_ok then
+        print(paint("Collapsed cleanly to the owned route.", COLOR_GREEN))
+    else
+        print(paint("Collapsed to the owned route with explicit partial-cleanup warnings.", COLOR_ORANGE))
+    end if
+    return owned_ok
+end function
+
+
+extend_proxy = function(requested)
+    if globals.proxy_nodes.len > 0 then
+        print(paint("A proxy layer is already active. Type collapse first.", COLOR_RED))
+        return false
+    end if
+    if globals.shells.len < 2 then
+        print(paint("The owned route is not ready.", COLOR_RED))
+        return false
+    end if
+    available = load_autonet_nodes(globals.shells[-1])
+    if available.len == 0 then
+        print(paint("No verified AutoNet nodes are available on the final owned server.", COLOR_RED))
+        return false
+    end if
+    count = requested
+    if count > available.len then
+        print(paint("Requested " + count + " proxy hops; using all " + available.len +
+            " available nodes.", COLOR_ORANGE))
+        count = available.len
+    end if
+    selected = select_proxy_nodes(available, count)
+    reset_proxy_objects
+    globals.proxy_seed_helper_path = stage_proxy_helper_seed
+    if globals.proxy_seed_helper_path == "" then return false
+    previous_shell = globals.shells[-1]
+    previous_helper = globals.proxy_seed_helper_path
+
+    print(paint("Extending beyond the owned route", COLOR_PURPLE) + "  hops=" +
+        paint(selected.len, COLOR_GREEN))
+    for node in selected
+        print(paint("Connecting proxy ", COLOR_PURPLE) +
+            paint((globals.proxy_nodes.len + 1) + "/" + selected.len, COLOR_PINK) + "  " +
+            paint(node.ip + ":" + node.port, COLOR_CYAN))
+        connected = previous_shell.connect_service(node.ip, node.port, node.user,
+            node.password, "ssh")
+        if not proxy_shell_valid(connected, node) then
+            print(paint("Reusable root SSH failed for " + node.ip + ".", COLOR_RED))
+            print(paint("The failed candidate may retain connection evidence.", COLOR_ORANGE))
+            remove_proxy_seed_helper
+            collapse_proxy
+            return false
+        end if
+
+        computer_source = stage_computer_source(connected)
+        helper_path = deploy_helper(previous_shell, previous_helper, connected)
+        router_source = stage_remote_router_source(connected, helper_path)
+        if not is_file(computer_source) then
+            delete_remote_helper(connected, helper_path)
+            connected = null
+            wait(FINALIZER_WAIT_SECONDS)
+            print(paint("Proxy computer cleanup source unavailable; extension stopped.", COLOR_RED))
+            remove_proxy_seed_helper
+            collapse_proxy
+            return false
+        end if
+
+        globals.proxy_nodes.push(node)
+        globals.proxy_shells.push(connected)
+        globals.proxy_computer_sources.push(computer_source)
+        globals.proxy_router_sources.push(router_source)
+        globals.proxy_helper_paths.push(helper_path)
+
+        previous_index = globals.proxy_nodes.len - 2
+        if previous_index < 0 then
+            remove_proxy_seed_helper
+            clean_stage(globals.shells.len - 1)
+        else
+            delete_remote_helper(globals.proxy_shells[previous_index],
+                globals.proxy_helper_paths[previous_index])
+            globals.proxy_helper_paths[previous_index] = ""
+            clean_proxy_stage(previous_index)
+        end if
+        previous_shell = connected
+        previous_helper = helper_path
+    end for
+
+    last = globals.proxy_nodes.len - 1
+    delete_remote_helper(globals.proxy_shells[last], globals.proxy_helper_paths[last])
+    globals.proxy_helper_paths[last] = ""
+    remove_proxy_seed_helper
+    clean_proxy_stage(last)
+    print(paint("Proxy route ready.", COLOR_GREEN) + "  active-hops=" +
+        paint(globals.proxy_nodes.len, COLOR_CYAN))
+    open_final_terminal
+    return true
+end function
+
+
+clean_stage = function(index)
+    label = "home"
+    if index > 0 then label = globals.hops[index - 1].alias
+    computer_ok = clean_value(globals.shells[index])
+    router_ok = false
+    if index < globals.router_sources.len then router_ok = clean_source(globals.router_sources[index])
+    computer_color = COLOR_RED
+    router_color = COLOR_RED
+    if computer_ok then computer_color = COLOR_GREEN
+    if router_ok then router_color = COLOR_GREEN
+    print("  " + paint(label, COLOR_CYAN) + "  computer=" +
+        paint(["FAIL", "clean"][computer_ok], computer_color) + "  router=" +
+        paint(["FAIL", "clean"][router_ok], router_color))
+    return computer_ok and router_ok
+end function
+
+
+clean_all = function()
+    print(paint("Route cleanup", COLOR_ORANGE))
+    all_ok = true
+    index = globals.shells.len - 1
+    while index >= 0
+        if not clean_stage(index) then all_ok = false
+        index = index - 1
+    end while
+    if all_ok then
+        print(paint("Owned route logs replaced.", COLOR_GREEN))
+    else
+        print(paint("Cleanup was partial. Any FAIL surface still needs attention.", COLOR_RED))
+    end if
+    return all_ok
+end function
+
+
+clean_everything = function()
+    proxy_ok = clean_proxy_all
+    owned_ok = clean_all
+    return proxy_ok and owned_ok
+end function
+
+
+open_final_terminal = function()
+    if globals.shells.len < 2 then return false
+    shell = globals.shells[-1]
+    if globals.proxy_shells.len > 0 then shell = globals.proxy_shells[-1]
+    computer = shell.host_computer
+    terminal = computer.File("/usr/bin/Terminal.exe")
+    if not is_file(terminal) then terminal = computer.File("/bin/Terminal.exe")
+    if not is_file(terminal) then
+        print(paint("Terminal.exe was not found on the current route endpoint.", COLOR_RED))
+        return false
+    end if
+    shell.launch(terminal.path)
+    print(paint("Current-route terminal requested.", COLOR_GREEN))
+    return true
+end function
+
+
+reset_route_objects = function()
+    globals.shells = []
+    globals.router_sources = []
+    globals.helper_paths = []
+end function
+
+
+build_route = function()
+    reset_route_objects
+    globals.shells.push(globals.local_shell)
+    home_router_source = stage_local_router_source
+    if not is_file(home_router_source) and HOME_ROUTER_PASSWORD != "" then
+        home_router_source = stage_router_root_source(globals.last_router_shell, HOME_ROUTER_PASSWORD)
+    end if
+    globals.router_sources.push(home_router_source)
+    globals.helper_paths.push(program_path)
+
+    previous_shell = globals.local_shell
+    previous_helper = program_path
+    number = 0
+    for hop in globals.hops
+        print(paint("Connecting ", COLOR_PURPLE) + paint(hop.alias, COLOR_GREEN) + "  " +
+            paint(hop.user + "@" + hop.ip + ":" + hop.port, COLOR_CYAN))
+        connected = previous_shell.connect_service(hop.ip, hop.port, hop.user, hop.password, "ssh")
+        if not is_shell(connected) then
+            print(paint("SSH connection failed at " + hop.alias + ".", COLOR_RED))
+            clean_all
+            return false
+        end if
+
+        helper_path = deploy_helper(previous_shell, previous_helper, connected)
+        router_source = stage_remote_router_source(connected, helper_path)
+        globals.shells.push(connected)
+        globals.router_sources.push(router_source)
+        globals.helper_paths.push(helper_path)
+
+        // Once the next hop exists, the previous computer and router are no
+        // longer needed for route construction. Replace their logs immediately.
+        clean_stage(number)
+        previous_shell = connected
+        previous_helper = helper_path
+        number = number + 1
+    end for
+
+    clean_stage(globals.shells.len - 1)
+    print(paint("Route ready.", COLOR_GREEN))
+    return true
+end function
+
+
+show_status = function()
+    print(paint("Owned route", COLOR_PURPLE))
+    show_route(globals.hops)
+    print(paint("Owned shells: ", COLOR_PURPLE) + globals.shells.len)
+    index = 0
+    while index < globals.shells.len
+        label = "home"
+        if index > 0 then label = globals.hops[index - 1].alias
+        router_state = "missing"
+        if index < globals.router_sources.len and is_file(globals.router_sources[index]) then router_state = "ready"
+        color = COLOR_RED
+        if router_state == "ready" then color = COLOR_GREEN
+        print("  " + paint(label, COLOR_CYAN) + "  router-clean=" + paint(router_state, color))
+        index = index + 1
+    end while
+    print(paint("Proxy layer", COLOR_PURPLE) + "  active-hops=" +
+        paint(globals.proxy_nodes.len, COLOR_CYAN))
+    index = 0
+    while index < globals.proxy_nodes.len
+        node = globals.proxy_nodes[index]
+        computer_state = "missing"
+        router_state = "best-effort"
+        if index < globals.proxy_computer_sources.len and
+            is_file(globals.proxy_computer_sources[index]) then computer_state = "ready"
+        if index < globals.proxy_router_sources.len and
+            is_file(globals.proxy_router_sources[index]) then router_state = "ready"
+        computer_color = COLOR_RED
+        router_color = COLOR_ORANGE
+        if computer_state == "ready" then computer_color = COLOR_GREEN
+        if router_state == "ready" then router_color = COLOR_GREEN
+        print("  " + paint((index + 1) + " " + node.ip + ":" + node.port, COLOR_CYAN) +
+            "  computer-clean=" + paint(computer_state, computer_color) +
+            "  router-clean=" + paint(router_state, router_color))
+        index = index + 1
+    end while
+end function
+
+
+show_help = function()
+    print(paint("AutoRoute commands", COLOR_PURPLE))
+    print("  " + paint("nodes", COLOR_CYAN) + "                 list verified AutoNet proxy nodes")
+    print("  " + paint("extend [count]", COLOR_GREEN) + "        add 1-" + MAX_PROXY_HOPS +
+        " random proxy hops (default " + DEFAULT_PROXY_HOPS + ")")
+    print("  " + paint("collapse", COLOR_ORANGE) + "              clean proxy hops and return to owned route")
+    print("  " + paint("clean / clog / logs", COLOR_GREEN) + "  replace logs across every active layer")
+    print("  " + paint("open", COLOR_CYAN) + "                  open another current-route terminal")
+    print("  " + paint("status", COLOR_CYAN) + "                show route and cleaner readiness")
+    print("  " + paint("rebuild", COLOR_ORANGE) + "               collapse, clean, and reconnect owned route")
+    print("  " + paint("setup", COLOR_ORANGE) + "                 collapse and replace saved owned route")
+    print("  " + paint("quit", COLOR_RED) + "                  final cleanup and exit")
+end function
+
+
+if params.len > 0 then
+    if params[0] == "--router-clean-helper" then helper_mode
+    if params[0] == "--router-root-helper" then root_helper_mode
+end if
+
+globals.local_shell = get_shell
+globals.local_computer = globals.local_shell.host_computer
+globals.hops = []
+globals.last_router_shell = null
+reset_route_objects
+reset_proxy_objects
+
+print(paint("AutoRoute " + SCRIPT_VERSION, COLOR_PURPLE))
+if not ensure_network_layout then exit("Could not create /root/autoscripts/network.")
+if params.len > 0 and params[0].lower == "setup" then globals.hops = setup_route else globals.hops = load_route
+if typeof(globals.hops).lower != "list" then globals.hops = setup_route
+if typeof(globals.hops).lower != "list" then exit("Route setup was not completed.")
+show_route(globals.hops)
+
+if not build_route then exit("AutoRoute could not build the saved route.")
+open_final_terminal
+show_help
+
+while true
+    raw_command = user_input(paint("autoroute", COLOR_PURPLE) + "> ").trim.lower
+    words = []
+    for word in raw_command.split(" ")
+        if word.trim != "" then words.push(word.trim)
+    end for
+    command = ""
+    if words.len > 0 then command = words[0]
+    if command == "clean" or command == "clog" or command == "logs" then
+        clean_everything
+    else if command == "nodes" then
+        show_autonet_nodes
+    else if command == "extend" or command == "proxy" then
+        requested = DEFAULT_PROXY_HOPS
+        if words.len > 1 then
+            if not digits_only(words[1]) then
+                print(paint("Usage: extend [1-" + MAX_PROXY_HOPS + "]", COLOR_RED))
+                continue
+            end if
+            requested = words[1].to_int
+        end if
+        if requested < 1 or requested > MAX_PROXY_HOPS then
+            print(paint("Proxy hop count must be between 1 and " + MAX_PROXY_HOPS + ".", COLOR_RED))
+        else
+            extend_proxy(requested)
+        end if
+    else if command == "collapse" then
+        if collapse_proxy then open_final_terminal
+    else if command == "status" then
+        show_status
+    else if command == "open" then
+        open_final_terminal
+    else if command == "rebuild" then
+        collapse_proxy
+        if build_route then open_final_terminal
+    else if command == "setup" then
+        collapse_proxy
+        route = setup_route
+        if typeof(route).lower == "list" then
+            globals.hops = route
+            if build_route then open_final_terminal
+        end if
+    else if command == "help" or command == "?" then
+        show_help
+    else if command == "quit" or command == "exit" or command == "q" then
+        collapse_proxy
+        print(paint("AutoRoute closed.", COLOR_PURPLE))
+        exit
+    else if command != "" then
+        print(paint("Unknown command. Type help.", COLOR_RED))
+    end if
+end while
