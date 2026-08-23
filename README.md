@@ -1,3 +1,50 @@
+## AutoNet
+
+AutoNet is the SSH recruiter for the Auto script family. Run it from the final owned server opened by AutoRoute. It searches random public routers for SSH services, uses the shared vulnerability database, proves that the recovered root password works through a fresh SSH login, requires target-computer and owned execution-route cleanup, and then saves the machine as a reusable proxy node. Target-router cleanup is attempted and recorded but is no longer allowed to discard an otherwise verified node when the owned execution-route chain break is clean.
+
+AutoNet does not touch AutoRoute's trusted `owned-route.txt`. Its node database is kept separately at:
+
+`/root/autoscripts/autonet/nodes`
+
+ Commands
+
+```text
+autonet
+autonet hunt [verified-node goal] [random-candidate budget]
+autonet nodes
+autonet remove [index]
+autonet deny <public IP>
+autonet help
+```
+
+Examples:
+
+```text
+autonet hunt 1 250
+autonet hunt 5 1000
+autonet nodes
+autonet remove 3
+```
+
+`autonet nodes` never displays passwords. `autonet remove` requires an exact confirmation, removes every matching saved record during the shard rebuild, and adds the public IP to the denylist so it cannot be rediscovered.
+
+ Installation and first run
+
+1. Compile `autonet-0.1.1-dev.src` as `/bin/autonet` on AutoRoute's final owned server.
+2. Confirm that `/lib/metaxploit.so` and `/lib/crypto.so` exist on that server.
+3. Keep AutoRoute resident on home so the trusted owned route remains available for emergency cleanup.
+4. Start with `autonet hunt 1 250`.
+5. Inspect `autonet nodes` and `/root/autoscripts/autonet/logs/latest.txt` after the run.
+
+The development build scans unknown SSH libraries and adds what it learns to the shared ACVDB3 database under `/root/vulndb`. Known exact library versions are reused on later runs by AutoNet, AutoCred, AutoAcademic, and other compatible Auto-family tools.
+
+ Important limits
+
+- A root shell is not enough. AutoNet reconnects with a recovered root password before considering the node reusable.
+- Target-computer cleanup and execution computer/router cleanup are mandatory. Target-router cleanup is best-effort; its actual `yes` or `no` result is stored with the admitted node.
+- Failed exploitation can leave evidence on a candidate that AutoNet never controlled. The script reports that risk and cleans the execution server and its router before continuing.
+- Node credentials are stored in plaintext inside the game because AutoRoute Stage 2 needs unattended SSH reuse. Keep the AutoNet folder root-owned and do not publish its runtime shards.
+
 ## AutoCred 2.2.0
 
 AutoCred is a Grey Hack automation tool for classic **Credentials needed** Mission Contracts. It turns the normal credential-recovery workflow into one command, one masked MetaMail password/PIN prompt, and one job selection.
