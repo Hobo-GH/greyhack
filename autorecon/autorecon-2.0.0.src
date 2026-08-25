@@ -1,0 +1,1959 @@
+//Made By Hobo & Rowan
+// AutoRecon 2.0.0 vulnerability coverage harvester and exact-library locator
+// for Grey Hack Public v0.9.6773.
+//
+// AutoRecon reuses the shared ACVDB3 database, skips exact library versions
+// carrying a completed S receipt, fills partial or unknown versions, records
+// overflow result quality, and preserves remote discoveries in a sync outbox.
+// Dev7 preserves the field-proven locator and applies Chris's field-observed
+// Rowan Circuit connector alignment without changing locator behavior.
+// Non-focused libraries may support cleanup but never mutate focused research.
+
+SCRIPT_VERSION = "2.0.0"
+
+AUTOSCRIPTS_ROOT = "/root/autoscripts"
+APP_ROOT = "/root/autoscripts/autorecon"
+LOG_ROOT = "/root/autoscripts/autorecon/logs"
+TASK_ROOT = "/root/autoscripts/autorecon/tasks"
+SYNC_ROOT = "/root/autoscripts/autorecon/sync"
+OUTBOX_ROOT = "/root/autoscripts/autorecon/outbox"
+INBOX_ROOT = "/root/autoscripts/autorecon/inbox"
+LIBRARY_ROOT = "/root/autoscripts/autorecon/library-vault"
+FINDING_ROOT = "/root/autoscripts/autorecon/findings"
+FINDING_PATH = "/root/autoscripts/autorecon/findings/locations.txt"
+FOCUS_PATH = "/root/autoscripts/autorecon/tasks/focus.txt"
+
+VULN_DB_ROOT = "/root/vulndb"
+VULN_DB_INDEX_PATH = "/root/vulndb/index.txt"
+VULN_DB_INDEX_HEADER = "ACVDBINDEX3"
+VULN_DB_SHARD_HEADER = "ACVDB3"
+VULN_DB_SHARD_PREFIX = "shard-"
+VULN_DB_SHARD_LIMIT = 120000
+VULN_DB_SOURCE = "autorecon"
+
+FOCUS_HEADER = "ARFOCUS1"
+COVERAGE_HEADER = "ARCOVER1"
+COVERAGE_INDEX_HEADER = "ARCOVERINDEX1"
+COVERAGE_SHARD_PREFIX = "coverage-"
+OUTBOX_HEADER = "AROUT1"
+OUTBOX_INDEX_HEADER = "AROUTINDEX1"
+OUTBOX_SHARD_PREFIX = "vulns-"
+FINDING_HEADER = "ARFIND1"
+
+DEFAULT_HUNT_COUNT = 10
+MAX_HUNT_COUNT = 500
+LOCATOR_PROGRESS_INTERVAL = 100
+MAX_OVERFLOWS_PER_SERVICE = 96
+CLEANUP_ONLY_MAX_OVERFLOWS = 12
+HELPER_WAIT_SECONDS = 60
+FINALIZER_WAIT_SECONDS = 2
+RECON_PASSWORD_INJECT = "af2026"
+
+COLOR_PURPLE = "#D86CFF"
+COLOR_CYAN = "#55E7FF"
+COLOR_GREEN = "#63FF9B"
+COLOR_RED = "#FF5C7C"
+COLOR_ORANGE = "#FFB86B"
+COLOR_PINK = "#FF79C6"
+
+
+paint = function(value, color)
+    return "<color=" + color + ">" + str(value) + "</color>"
+end function
+
+
+show_auto_action = function(label, detail = "", color = COLOR_PURPLE)
+    line = paint("◆ " + label, color)
+    if detail != "" then line = line + "  " + paint(detail, COLOR_CYAN)
+    print(line)
+end function
+
+
+show_banner = function()
+    print("             " + paint("◆", COLOR_PINK) + "       " + paint("◆", COLOR_CYAN))
+    print("             " + paint("│", COLOR_PURPLE) + "       " + paint("│", COLOR_PURPLE))
+    print("       " + paint("◆──────┴──╮", COLOR_PINK) + "" + paint("╭──┴──────────◆", COLOR_CYAN))
+    print("      " + paint("│         ╰──", COLOR_PURPLE) + paint("◆", COLOR_GREEN) +
+        paint("──╯         │", COLOR_PURPLE))
+    print(paint("      │     ╭─────────────╮     │", COLOR_PURPLE))
+    print(paint("      ╰─────┤", COLOR_PURPLE) + paint("  AUTORECON  ", COLOR_PINK) +
+        paint("├─────╯", COLOR_PURPLE))
+    print(paint("            ╰──────┬──────╯", COLOR_PURPLE))
+    print(paint("      ◆────────────", COLOR_CYAN) + paint("┴", COLOR_GREEN) +
+        paint("────────────◆", COLOR_CYAN))
+    print("          " + paint("ROWAN CIRCUIT // " + SCRIPT_VERSION, COLOR_PURPLE))
+end function
+
+
+join_path = function(folder, name)
+    if folder == "/" then return "/" + name
+    if folder[-1] == "/" then return folder + name
+    return folder + "/" + name
+end function
+
+
+is_file = function(value)
+    return typeof(value).lower == "file"
+end function
+
+
+is_shell = function(value)
+    return typeof(value).lower == "shell"
+end function
+
+
+is_computer = function(value)
+    return typeof(value).lower == "computer"
+end function
+
+
+is_session = function(value)
+    return typeof(value).lower == "netsession"
+end function
+
+
+is_meta_lib = function(value)
+    return typeof(value).lower == "metalib"
+end function
+
+
+is_exploit_object = function(value)
+    kind = typeof(value).lower
+    return kind == "shell" or kind == "computer" or kind == "file"
+end function
+
+
+db_field = function(value)
+    cleaned = str(value).replace("[|]", "/")
+    cleaned = cleaned.replace(char(10), " ")
+    cleaned = cleaned.replace(char(13), " ")
+    return cleaned.trim
+end function
+
+
+path_component = function(value)
+    cleaned = db_field(value)
+    cleaned = cleaned.replace("[/]", "_")
+    cleaned = cleaned.replace("[:]", "_")
+    cleaned = cleaned.replace(" ", "_")
+    cleaned = cleaned.replace("@", "_")
+    if cleaned == "" then cleaned = "unknown"
+    return cleaned
+end function
+
+
+pad4 = function(number)
+    digits = str(number)
+    while digits.len < 4
+        digits = "0" + digits
+    end while
+    return digits
+end function
+
+
+digits_only = function(value)
+    text = str(value).trim
+    if text == "" then return false
+    for character in text
+        if character < "0" or character > "9" then return false
+    end for
+    return true
+end function
+
+
+ensure_folder_path = function(path)
+    computer = globals.local_computer
+    current = "/"
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        next_path = join_path(current, part)
+        item = computer.File(next_path)
+        if is_file(item) then
+            if not item.is_folder then return null
+        else
+            if computer.create_folder(current, part) != 1 then return null
+            item = computer.File(next_path)
+            if not is_file(item) or not item.is_folder then return null
+        end if
+        current = next_path
+    end for
+    return computer.File(path)
+end function
+
+
+touch_file = function(folder, name)
+    if not is_file(folder) then return null
+    path = join_path(folder.path, name)
+    file = globals.local_computer.File(path)
+    if is_file(file) then return file
+    if globals.local_computer.touch(folder.path, name) != 1 then return null
+    return globals.local_computer.File(path)
+end function
+
+
+init_layout = function()
+    globals.app_folder = ensure_folder_path(APP_ROOT)
+    globals.log_folder = ensure_folder_path(LOG_ROOT)
+    globals.task_folder = ensure_folder_path(TASK_ROOT)
+    globals.sync_folder = ensure_folder_path(SYNC_ROOT)
+    globals.outbox_folder = ensure_folder_path(OUTBOX_ROOT)
+    globals.inbox_folder = ensure_folder_path(INBOX_ROOT)
+    globals.library_folder = ensure_folder_path(LIBRARY_ROOT)
+    globals.finding_folder = ensure_folder_path(FINDING_ROOT)
+    if not is_file(globals.app_folder) then return false
+    if not is_file(globals.log_folder) then return false
+    if not is_file(globals.task_folder) then return false
+    if not is_file(globals.sync_folder) then return false
+    if not is_file(globals.outbox_folder) then return false
+    if not is_file(globals.inbox_folder) then return false
+    if not is_file(globals.library_folder) then return false
+    if not is_file(globals.finding_folder) then return false
+    return true
+end function
+
+
+terminal_diag = function(message, line)
+    lowered = message.lower
+    if lowered.indexOf("fail") != null or lowered.indexOf("risk") != null or
+        lowered.indexOf("unavailable") != null then return paint(line, COLOR_RED)
+    if lowered.indexOf("clean") != null or lowered.indexOf("outbox") != null or
+        lowered.indexOf("import") != null then return paint(line, COLOR_ORANGE)
+    if lowered.indexOf("vuln") != null or lowered.indexOf("scan") != null or
+        lowered.indexOf("coverage") != null then return paint(line, COLOR_PURPLE)
+    if lowered.indexOf("complete") != null or lowered.indexOf("success") != null then
+        return paint(line, COLOR_GREEN)
+    end if
+    if lowered.indexOf("host") != null or lowered.indexOf("target") != null or
+        lowered.indexOf("service") != null then return paint(line, COLOR_CYAN)
+    return line
+end function
+
+
+init_log = function()
+    globals.log_seq = 0
+    globals.log_pending = []
+    globals.log_file = touch_file(globals.log_folder, "latest.txt")
+    if not is_file(globals.log_file) then return false
+    header = "AutoRecon diagnostic log" + char(10) +
+        "version=" + SCRIPT_VERSION + char(10) +
+        "started=" + current_date + char(10) +
+        "execution_host=" + globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+    return globals.log_file.set_content(header) == 1
+end function
+
+
+flush_log = function()
+    if not is_file(globals.log_file) then return false
+    if globals.log_pending.len == 0 then return true
+    content = globals.log_file.get_content
+    if typeof(content).lower != "string" then return false
+    if globals.log_file.set_content(content + char(10) + globals.log_pending.join(char(10))) != 1 then
+        return false
+    end if
+    globals.log_pending = []
+    return true
+end function
+
+
+diag = function(message)
+    globals.log_seq = globals.log_seq + 1
+    line = "[ARLOG " + globals.log_seq + "] " + message
+    print(terminal_diag(message, line))
+    globals.log_pending.push(line)
+    if globals.log_pending.len >= 10 then flush_log
+end function
+
+
+reset_stats = function()
+    globals.stats = {"targets": 0, "routers": 0, "services": 0, "libraries": 0,
+        "complete_skips": 0, "partial": 0, "unknown": 0, "fresh_scans": 0,
+        "new_vulns": 0, "overflows": 0, "useful": 0, "prefilter_skips": 0,
+        "target_computer_clean": 0, "target_router_clean": 0,
+        "execution_computer_clean": 0, "execution_router_clean": 0,
+        "residual": 0, "execution_failures": 0,}
+end function
+
+
+root_from_value = function(value)
+    if is_shell(value) then return value.host_computer.File("/")
+    if is_computer(value) then return value.File("/")
+    if is_file(value) then
+        current = value
+        while current.parent
+            current = current.parent
+        end while
+        return current
+    end if
+    return null
+end function
+
+
+child_named = function(folder, name)
+    if not is_file(folder) or not folder.is_folder then return null
+    folders = folder.get_folders
+    if typeof(folders).lower == "list" then
+        for child in folders
+            if child.name == name then return child
+        end for
+    end if
+    files = folder.get_files
+    if typeof(files).lower == "list" then
+        for child in files
+            if child.name == name then return child
+        end for
+    end if
+    return null
+end function
+
+
+file_from_root = function(root, path)
+    if not is_file(root) then return null
+    current = root
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        current = child_named(current, part)
+        if not is_file(current) then return null
+    end for
+    return current
+end function
+
+
+has_rwx = function(value)
+    if not is_file(value) then return false
+    if not value.has_permission("r") then return false
+    if not value.has_permission("w") then return false
+    return value.has_permission("x")
+end function
+
+
+access_level = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return "none"
+    root_home = file_from_root(root, "/root")
+    if has_rwx(root_home) then return "root"
+    home = file_from_root(root, "/home")
+    if not is_file(home) then return "guest"
+    folders = home.get_folders
+    if typeof(folders).lower != "list" then return "guest"
+    for folder in folders
+        if folder.name == "guest" then continue
+        if has_rwx(folder) then return "user"
+    end for
+    return "guest"
+end function
+
+
+scrub_source_from_value = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return null
+    for path in ["/var/silentclean", "/etc/fstab", "/etc/xorg.conf"]
+        candidate = file_from_root(root, path)
+        if not is_file(candidate) then continue
+        if candidate.is_folder or candidate.is_binary then continue
+        if candidate.has_permission("r") then return candidate
+    end for
+    etc = file_from_root(root, "/etc")
+    if not is_file(etc) then return null
+    files = etc.get_files
+    if typeof(files).lower != "list" then return null
+    for candidate in files
+        if candidate.is_folder or candidate.is_binary then continue
+        if candidate.has_permission("r") then return candidate
+    end for
+    return null
+end function
+
+
+stage_clean_source = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return null
+    log_file = file_from_root(root, "/var/system.log")
+    if not is_file(log_file) or not log_file.has_permission("w") then return null
+    return scrub_source_from_value(value)
+end function
+
+
+clean_source = function(source)
+    if not is_file(source) then return false
+    return source.copy("/var", "system.log") == 1
+end function
+
+
+unsafe_checks = function(provider, meta_lib, region)
+    checks = []
+    scan_text = provider.scan_address(meta_lib, region)
+    if typeof(scan_text).lower != "string" then return checks
+    pieces = scan_text.split("Unsafe check: ")
+    if pieces.len < 2 then return checks
+    for piece in pieces[1:]
+        start = piece.indexOf("<b>")
+        finish = piece.indexOf("</b>")
+        if start == null or finish == null or finish <= start + 3 then continue
+        unsafe = piece[start + 3:finish].replace(char(10), "").trim
+        if unsafe != "" and checks.indexOf(unsafe) == null then checks.push(unsafe)
+    end for
+    return checks
+end function
+
+
+stage_local_router_source = function()
+    router = get_router
+    if typeof(router).lower != "router" then return null
+    provider = include_lib("/lib/metaxploit.so")
+    if typeof(provider).lower != "metaxploitlib" then return null
+    session = provider.net_use(router.public_ip, 0)
+    if not is_session(session) then return null
+    meta_lib = session.dump_lib
+    if not is_meta_lib(meta_lib) then return null
+    regions = provider.scan(meta_lib)
+    if typeof(regions).lower != "list" then return null
+    for region in regions
+        for unsafe in unsafe_checks(provider, meta_lib, region)
+            result = meta_lib.overflow(region, unsafe, router.local_ip)
+            source = stage_clean_source(result)
+            if is_file(source) then return source
+            result = meta_lib.overflow(region, unsafe)
+            source = stage_clean_source(result)
+            if is_file(source) then return source
+        end for
+    end for
+    return null
+end function
+
+
+router_helper_mode = function()
+    bridge = get_custom_object
+    bridge.ar_router_source = null
+    bridge.ar_router_status = "running"
+    source = stage_local_router_source
+    if is_file(source) then
+        bridge.ar_router_source = source
+        bridge.ar_router_status = "ready"
+    else
+        bridge.ar_router_status = "unavailable"
+    end if
+    exit
+end function
+
+
+writable_folder = function(shell)
+    if not is_shell(shell) then return null
+    computer = shell.host_computer
+    root = computer.File("/root")
+    if is_file(root) and root.has_permission("w") and root.has_permission("x") then return root
+    homes = computer.File("/home")
+    if not is_file(homes) then return null
+    folders = homes.get_folders
+    if typeof(folders).lower != "list" then return null
+    for folder in folders
+        if folder.has_permission("w") and folder.has_permission("x") then return folder
+    end for
+    return null
+end function
+
+
+deploy_router_helper = function(remote_shell)
+    work = writable_folder(remote_shell)
+    if not is_file(work) then return ""
+    source_file = globals.local_computer.File(program_path)
+    if not is_file(source_file) then return ""
+    if globals.local_shell.scp(program_path, work.path, remote_shell) != 1 then return ""
+    remote_path = join_path(work.path, source_file.name)
+    if not is_file(remote_shell.host_computer.File(remote_path)) then return ""
+    return remote_path
+end function
+
+
+stage_remote_router_source = function(remote_shell)
+    helper_path = deploy_router_helper(remote_shell)
+    if helper_path == "" then return {"source": null, "helper": ""}
+    bridge = get_custom_object
+    bridge.ar_router_source = null
+    bridge.ar_router_status = "waiting"
+    remote_shell.launch(helper_path, "--router-clean-helper")
+    waited = 0
+    while waited < HELPER_WAIT_SECONDS
+        if bridge.ar_router_status != "waiting" and bridge.ar_router_status != "running" then break
+        wait(0.2)
+        waited = waited + 0.2
+    end while
+    source = bridge.ar_router_source
+    bridge.ar_router_source = null
+    return {"source": source, "helper": helper_path}
+end function
+
+
+delete_remote_helper = function(remote_shell, helper_path)
+    if not is_shell(remote_shell) or helper_path == "" then return
+    file = remote_shell.host_computer.File(helper_path)
+    if is_file(file) then file.delete
+end function
+
+
+prepare_execution_cleanup = function()
+    if is_file(globals.execution_computer_source) then return true
+    globals.execution_computer_source = stage_clean_source(globals.local_shell)
+    globals.execution_router_source = stage_local_router_source
+    computer_ready = is_file(globals.execution_computer_source)
+    router_ready = is_file(globals.execution_router_source)
+    diag("execution cleanup staged | host=" + globals.local_computer.public_ip + "/" +
+        globals.local_computer.local_ip + " | computer=" + computer_ready + " | router=" + router_ready)
+    return computer_ready
+end function
+
+
+clean_execution_route = function()
+    computer_ok = clean_source(globals.execution_computer_source)
+    router_ok = clean_source(globals.execution_router_source)
+    if computer_ok then
+        globals.stats.execution_computer_clean = globals.stats.execution_computer_clean + 1
+    end if
+    if router_ok then
+        globals.stats.execution_router_clean = globals.stats.execution_router_clean + 1
+    end if
+    diag("execution logs clean | computer=" + computer_ok + " | router=" + router_ok)
+    if not computer_ok then globals.stats.execution_failures = globals.stats.execution_failures + 1
+    return computer_ok
+end function
+
+
+vuln_fingerprint_values = function(library, version)
+    return str(library) + "@" + str(version)
+end function
+
+
+vuln_major = function(version)
+    parts = str(version).split("[.]")
+    if parts.len == 0 then return "unknown"
+    return path_component(parts[0])
+end function
+
+
+vuln_bucket_key_values = function(library, version)
+    return str(library) + "@V" + vuln_major(version)
+end function
+
+
+vuln_mode = function(requirement)
+    lowered = requirement.lower
+    if lowered.indexOf("password") != null then return "password"
+    if lowered.indexOf("lan ip") != null or lowered.indexOf("local ip") != null or
+        lowered.indexOf("same subnet") != null or lowered.indexOf("same network") != null or
+        lowered.indexOf("router membership") != null then return "lan"
+    if lowered.trim == "" then return "plain"
+    return "unknown"
+end function
+
+
+vuln_shard_name = function(number)
+    return VULN_DB_SHARD_PREFIX + pad4(number) + ".txt"
+end function
+
+
+remember_fingerprint = function(library, version)
+    fingerprint = vuln_fingerprint_values(library, version)
+    globals.vuln_meta[fingerprint] = [str(library), str(version)]
+    if not globals.vulns.hasIndex(fingerprint) then globals.vulns[fingerprint] = []
+    return fingerprint
+end function
+
+
+merge_vuln = function(fingerprint, incoming)
+    if not globals.vulns.hasIndex(fingerprint) then globals.vulns[fingerprint] = []
+    for known in globals.vulns[fingerprint]
+        if known.region != incoming.region or known.unsafe != incoming.unsafe or
+            known.mode != incoming.mode then continue
+        if incoming.score > known.score then
+            known.score = incoming.score
+            known.last_kind = incoming.last_kind
+        end if
+        if incoming.hits > known.hits then known.hits = incoming.hits
+        if incoming.attempts > known.attempts then known.attempts = incoming.attempts
+        if known.requirement == "" and incoming.requirement != "" then known.requirement = incoming.requirement
+        return false
+    end for
+    globals.vulns[fingerprint].push(incoming)
+    return true
+end function
+
+
+mark_vuln_dirty = function(fingerprint)
+    globals.vuln_dirty = true
+    globals.vuln_dirty_fingerprints[fingerprint] = 1
+    if not globals.authoritative_db then globals.outbox_fingerprints[fingerprint] = 1
+end function
+
+
+load_vuln_content = function(content, origin = "database")
+    if typeof(content).lower != "string" then return 0
+    loaded = 0
+    for line in content.replace(char(13), "").split(char(10))
+        parts = line.trim.split("[|]")
+        if parts.len < 3 then continue
+        if parts[0] == "S" then
+            fingerprint = remember_fingerprint(parts[1], parts[2])
+            globals.vuln_scanned[fingerprint] = 1
+            if origin == "outbox" then globals.outbox_fingerprints[fingerprint] = 1
+            if origin == "import" then mark_vuln_dirty(fingerprint)
+            continue
+        end if
+        if parts[0] == "P" then
+            fingerprint = remember_fingerprint(parts[1], parts[2])
+            globals.vuln_partial[fingerprint] = 1
+            continue
+        end if
+        if parts[0] != "V" or parts.len < 11 then continue
+        score = parts[7].to_int
+        hits = parts[8].to_int
+        attempts = parts[9].to_int
+        if typeof(score).lower != "number" then score = 0
+        if typeof(hits).lower != "number" then hits = 0
+        if typeof(attempts).lower != "number" then attempts = 0
+        source = "-"
+        if parts.len >= 12 then source = parts[11]
+        fingerprint = remember_fingerprint(parts[1], parts[2])
+        incoming = {"lib": parts[1], "version": parts[2], "region": parts[3],
+            "unsafe": parts[4], "mode": parts[5], "requirement": parts[6],
+            "score": score, "hits": hits, "attempts": attempts,
+            "last_kind": parts[10], "source": source,}
+        if merge_vuln(fingerprint, incoming) then loaded = loaded + 1
+        globals.vuln_partial[fingerprint] = 1
+        if origin == "outbox" then globals.outbox_fingerprints[fingerprint] = 1
+        if origin == "import" then mark_vuln_dirty(fingerprint)
+    end for
+    return loaded
+end function
+
+
+load_vuln_index = function()
+    globals.vuln_index = {}
+    file = globals.local_computer.File(VULN_DB_INDEX_PATH)
+    if not is_file(file) then return "missing"
+    content = file.get_content
+    if typeof(content).lower != "string" then return "unreadable"
+    lines = content.replace(char(13), "").split(char(10))
+    if lines.len == 0 or lines[0].trim != VULN_DB_INDEX_HEADER then return "incompatible"
+    for line in lines[1:]
+        parts = line.trim.split("[|]")
+        if parts.len < 7 or parts[0] != "B" then continue
+        count = parts[5].to_int
+        if typeof(count).lower != "number" then count = 0
+        key = parts[1] + "@V" + parts[2]
+        globals.vuln_index[key] = {"lib": parts[1], "major": parts[2],
+            "folder": parts[3], "bucket": parts[4], "count": count, "source": parts[6],}
+    end for
+    return VULN_DB_INDEX_HEADER
+end function
+
+
+vuln_bucket_folder = function(library, version, create = false)
+    library_path = join_path(VULN_DB_ROOT, path_component(library))
+    library_folder = globals.local_computer.File(library_path)
+    if not is_file(library_folder) and create then library_folder = ensure_folder_path(library_path)
+    if not is_file(library_folder) or not library_folder.is_folder then return null
+    bucket_path = join_path(library_folder.path, "V" + vuln_major(version))
+    folder = globals.local_computer.File(bucket_path)
+    if not is_file(folder) and create then folder = ensure_folder_path(bucket_path)
+    if not is_file(folder) or not folder.is_folder then return null
+    return folder
+end function
+
+
+load_vuln_bucket_values = function(library, version)
+    bucket_key = vuln_bucket_key_values(library, version)
+    if globals.vuln_loaded_buckets.hasIndex(bucket_key) then return 0
+    globals.vuln_loaded_buckets[bucket_key] = 1
+    folder = vuln_bucket_folder(library, version)
+    if not is_file(folder) then return 0
+    count = 0
+    if globals.vuln_index.hasIndex(bucket_key) then count = globals.vuln_index[bucket_key].count
+    names = []
+    if count > 0 then
+        number = 1
+        while number <= count
+            names.push(vuln_shard_name(number))
+            number = number + 1
+        end while
+    else
+        files = folder.get_files
+        if typeof(files).lower == "list" then
+            for file in files
+                if file.name.indexOf(VULN_DB_SHARD_PREFIX) == 0 then names.push(file.name)
+            end for
+        end if
+    end if
+    loaded = 0
+    for name in names
+        file = globals.local_computer.File(join_path(folder.path, name))
+        if is_file(file) then loaded = loaded + load_vuln_content(file.get_content)
+    end for
+    diag("vuln bucket load | bucket=" + bucket_key + " | entries=" + loaded)
+    return loaded
+end function
+
+
+load_coverage_seed = function()
+    files = globals.sync_folder.get_files
+    if typeof(files).lower != "list" then return 0
+    loaded = 0
+    for file in files
+        if file.name.indexOf(COVERAGE_SHARD_PREFIX) != 0 then continue
+        content = file.get_content
+        if typeof(content).lower != "string" then continue
+        lines = content.replace(char(13), "").split(char(10))
+        if lines.len == 0 or lines[0].trim != COVERAGE_HEADER then continue
+        loaded = loaded + load_vuln_content(content, "seed")
+    end for
+    return loaded
+end function
+
+
+load_outbox = function()
+    files = globals.outbox_folder.get_files
+    if typeof(files).lower != "list" then return 0
+    loaded = 0
+    for file in files
+        if file.name.indexOf(OUTBOX_SHARD_PREFIX) != 0 then continue
+        content = file.get_content
+        if typeof(content).lower != "string" then continue
+        lines = content.replace(char(13), "").split(char(10))
+        if lines.len == 0 or lines[0].trim != OUTBOX_HEADER then continue
+        loaded = loaded + load_vuln_content(content, "outbox")
+    end for
+    return loaded
+end function
+
+
+coverage_state = function(library, version)
+    if globals.authoritative_db then load_vuln_bucket_values(library, version)
+    fingerprint = remember_fingerprint(library, version)
+    if globals.vuln_scanned.hasIndex(fingerprint) then return "complete"
+    if globals.vuln_partial.hasIndex(fingerprint) then return "partial"
+    if globals.vulns[fingerprint].len > 0 then return "partial"
+    return "unknown"
+end function
+
+
+vuln_line = function(entry)
+    source = VULN_DB_SOURCE
+    if entry.source != "" and entry.source != "-" then source = entry.source
+    return "V|" + db_field(entry.lib) + "|" + db_field(entry.version) + "|" +
+        db_field(entry.region) + "|" + db_field(entry.unsafe) + "|" +
+        db_field(entry.mode) + "|" + db_field(entry.requirement) + "|" +
+        entry.score + "|" + entry.hits + "|" + entry.attempts + "|" +
+        db_field(entry.last_kind) + "|" + db_field(source)
+end function
+
+
+write_vuln_bucket = function(bucket_key)
+    bucket_parts = bucket_key.split("@V")
+    if bucket_parts.len < 2 then return null
+    library = bucket_parts[0]
+    major = bucket_parts[1]
+    folder = vuln_bucket_folder(library, major + ".0.0", true)
+    if not is_file(folder) then return null
+    old_count = 0
+    if globals.vuln_index.hasIndex(bucket_key) then old_count = globals.vuln_index[bucket_key].count
+    number = 1
+    lines = [VULN_DB_SHARD_HEADER]
+    size = VULN_DB_SHARD_HEADER.len
+    for fingerprint in globals.vuln_meta.indexes
+        meta = globals.vuln_meta[fingerprint]
+        if vuln_bucket_key_values(meta[0], meta[1]) != bucket_key then continue
+        scan_line = "S|" + db_field(meta[0]) + "|" + db_field(meta[1])
+        if size + scan_line.len + 1 > VULN_DB_SHARD_LIMIT and lines.len > 1 then
+            file = touch_file(folder, vuln_shard_name(number))
+            if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return null
+            number = number + 1
+            lines = [VULN_DB_SHARD_HEADER]
+            size = VULN_DB_SHARD_HEADER.len
+        end if
+        if globals.vuln_scanned.hasIndex(fingerprint) then
+            lines.push(scan_line)
+            size = size + scan_line.len + 1
+        end if
+        for entry in globals.vulns[fingerprint]
+            line = vuln_line(entry)
+            if size + line.len + 1 > VULN_DB_SHARD_LIMIT and lines.len > 1 then
+                file = touch_file(folder, vuln_shard_name(number))
+                if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return null
+                number = number + 1
+                lines = [VULN_DB_SHARD_HEADER]
+                size = VULN_DB_SHARD_HEADER.len
+                if globals.vuln_scanned.hasIndex(fingerprint) then
+                    lines.push(scan_line)
+                    size = size + scan_line.len + 1
+                end if
+            end if
+            lines.push(line)
+            size = size + line.len + 1
+        end for
+    end for
+    file = touch_file(folder, vuln_shard_name(number))
+    if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return null
+    retired = number + 1
+    while retired <= old_count
+        old_file = globals.local_computer.File(join_path(folder.path, vuln_shard_name(retired)))
+        if is_file(old_file) then old_file.delete
+        retired = retired + 1
+    end while
+    globals.vuln_index[bucket_key] = {"lib": library, "major": major,
+        "folder": path_component(library), "bucket": "V" + major,
+        "count": number, "source": VULN_DB_SOURCE,}
+    return number
+end function
+
+
+save_vulns = function()
+    if not globals.vuln_dirty then return true
+    dirty_buckets = {}
+    for fingerprint in globals.vuln_dirty_fingerprints.indexes
+        if not globals.vuln_meta.hasIndex(fingerprint) then continue
+        meta = globals.vuln_meta[fingerprint]
+        dirty_buckets[vuln_bucket_key_values(meta[0], meta[1])] = 1
+    end for
+    for bucket_key in dirty_buckets.indexes
+        if typeof(write_vuln_bucket(bucket_key)).lower != "number" then return false
+    end for
+    folder = globals.local_computer.File(VULN_DB_ROOT)
+    if not is_file(folder) then return false
+    index = touch_file(folder, "index.txt")
+    if not is_file(index) then return false
+    lines = [VULN_DB_INDEX_HEADER]
+    for bucket_key in globals.vuln_index.indexes
+        entry = globals.vuln_index[bucket_key]
+        lines.push("B|" + db_field(entry.lib) + "|" + db_field(entry.major) + "|" +
+            db_field(entry.folder) + "|" + db_field(entry.bucket) + "|" +
+            entry.count + "|" + db_field(entry.source))
+    end for
+    if index.set_content(lines.join(char(10))) != 1 then return false
+    globals.vuln_dirty = false
+    globals.vuln_dirty_fingerprints = {}
+    diag("vuln db save complete | buckets=" + dirty_buckets.indexes.len)
+    return true
+end function
+
+
+write_outbox = function()
+    if globals.outbox_fingerprints.indexes.len == 0 then return true
+    lines = [OUTBOX_HEADER]
+    size = OUTBOX_HEADER.len
+    number = 1
+    written = 0
+    for fingerprint in globals.outbox_fingerprints.indexes
+        if not globals.vuln_meta.hasIndex(fingerprint) then continue
+        meta = globals.vuln_meta[fingerprint]
+        block = []
+        if globals.vuln_scanned.hasIndex(fingerprint) then
+            block.push("S|" + db_field(meta[0]) + "|" + db_field(meta[1]))
+        end if
+        for entry in globals.vulns[fingerprint]
+            block.push(vuln_line(entry))
+        end for
+        for line in block
+            if size + line.len + 1 > VULN_DB_SHARD_LIMIT and lines.len > 1 then
+                file = touch_file(globals.outbox_folder, OUTBOX_SHARD_PREFIX + pad4(number) + ".txt")
+                if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return false
+                number = number + 1
+                lines = [OUTBOX_HEADER]
+                size = OUTBOX_HEADER.len
+            end if
+            lines.push(line)
+            size = size + line.len + 1
+            written = written + 1
+        end for
+    end for
+    file = touch_file(globals.outbox_folder, OUTBOX_SHARD_PREFIX + pad4(number) + ".txt")
+    if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return false
+    existing = globals.outbox_folder.get_files
+    if typeof(existing).lower == "list" then
+        for old in existing
+            if old.name.indexOf(OUTBOX_SHARD_PREFIX) != 0 then continue
+            number_text = old.name.replace(OUTBOX_SHARD_PREFIX, "").replace(".txt", "").to_int
+            if typeof(number_text).lower == "number" and number_text > number then old.delete
+        end for
+    end if
+    index = touch_file(globals.outbox_folder, "index.txt")
+    if is_file(index) then index.set_content(OUTBOX_INDEX_HEADER + char(10) + "S|" + number + char(10) + "R|" + written)
+    diag("outbox save complete | fingerprints=" + globals.outbox_fingerprints.indexes.len +
+        " | shards=" + number + " | records=" + written)
+    globals.vuln_dirty = false
+    globals.vuln_dirty_fingerprints = {}
+    return true
+end function
+
+
+save_research = function()
+    if globals.authoritative_db then return save_vulns
+    return write_outbox
+end function
+
+
+init_vulns = function()
+    globals.vulns = {}
+    globals.vuln_meta = {}
+    globals.vuln_scanned = {}
+    globals.vuln_partial = {}
+    globals.vuln_index = {}
+    globals.vuln_loaded_buckets = {}
+    globals.vuln_dirty = false
+    globals.vuln_dirty_fingerprints = {}
+    globals.outbox_fingerprints = {}
+    state = load_vuln_index
+    globals.authoritative_db = state == VULN_DB_INDEX_HEADER
+    seed_count = 0
+    outbox_count = 0
+    if not globals.authoritative_db then
+        seed_count = load_coverage_seed
+        outbox_count = load_outbox
+    end if
+    diag("vuln db ready | authoritative=" + globals.authoritative_db + " | state=" + state +
+        " | seed_entries=" + seed_count + " | outbox_entries=" + outbox_count)
+end function
+
+
+scan_vulnerabilities = function(provider, meta_lib, force = false)
+    library = meta_lib.lib_name
+    version = str(meta_lib.version)
+    if globals.authoritative_db then load_vuln_bucket_values(library, version)
+    fingerprint = remember_fingerprint(library, version)
+    if globals.vuln_scanned.hasIndex(fingerprint) and not force then return globals.vulns[fingerprint]
+    before = globals.vulns[fingerprint].len
+    regions = provider.scan(meta_lib)
+    if typeof(regions).lower != "list" then return globals.vulns[fingerprint]
+    for region in regions
+        scan_text = provider.scan_address(meta_lib, region)
+        if typeof(scan_text).lower != "string" then continue
+        pieces = scan_text.split("Unsafe check: ")
+        if pieces.len < 2 then continue
+        for piece in pieces[1:]
+            start = piece.indexOf("<b>")
+            finish = piece.indexOf("</b>")
+            if start == null or finish == null or finish <= start + 3 then continue
+            unsafe = piece[start + 3:finish].replace(char(10), "").trim
+            if unsafe == "" then continue
+            requirement = piece[finish + 4:].replace("<b>", "").replace("</b>", "")
+            requirement = requirement.replace("<color=red>", "").replace("</color>", "")
+            requirement = requirement.replace(char(10), " ").trim
+            while requirement.indexOf("  ") != null
+                requirement = requirement.replace("  ", " ")
+            end while
+            incoming = {"lib": library, "version": version, "region": region,
+                "unsafe": unsafe, "mode": vuln_mode(requirement),
+                "requirement": requirement, "score": 0, "hits": 0,
+                "attempts": 0, "last_kind": "untried", "source": VULN_DB_SOURCE,}
+            merge_vuln(fingerprint, incoming)
+        end for
+    end for
+    globals.vuln_scanned[fingerprint] = 1
+    globals.vuln_partial[fingerprint] = 1
+    mark_vuln_dirty(fingerprint)
+    added = globals.vulns[fingerprint].len - before
+    globals.stats.new_vulns = globals.stats.new_vulns + added
+    globals.stats.fresh_scans = globals.stats.fresh_scans + 1
+    diag("vuln scan complete | library=" + fingerprint + " | entries=" +
+        globals.vulns[fingerprint].len + " | added=" + added)
+    return globals.vulns[fingerprint]
+end function
+
+
+ordered_vulns = function(entries)
+    ordered = []
+    for floor_score in [90, 70, 50, 1, -1000]
+        for entry in entries
+            if floor_score == 90 and entry.score >= 90 then ordered.push(entry)
+            if floor_score == 70 and entry.score >= 70 and entry.score < 90 then ordered.push(entry)
+            if floor_score == 50 and entry.score >= 50 and entry.score < 70 then ordered.push(entry)
+            if floor_score == 1 and entry.score > 0 and entry.score < 50 then ordered.push(entry)
+            if floor_score == -1000 and entry.score <= 0 then ordered.push(entry)
+        end for
+    end for
+    return ordered
+end function
+
+
+requirement_ready = function(entry, session)
+    if entry.mode == "lan" then return false
+    lowered = entry.requirement.lower
+    if lowered.indexOf("root active") != null or lowered.indexOf("active root") != null then
+        if not session.is_root_active_user then return false
+    end if
+    if lowered.indexOf("active user") != null then
+        if not session.is_any_active_user then return false
+    end if
+    return true
+end function
+
+
+record_vuln_result = function(entry, result, persist = true)
+    // Cleanup-only dependency probes must not change scores, attempts, hits,
+    // source labels, dirty buckets, or outbox research outside the focus.
+    if not persist then return
+    entry.attempts = entry.attempts + 1
+    kind = typeof(result).lower
+    entry.last_kind = kind
+    level = access_level(result)
+    score = 0
+    if is_exploit_object(result) then entry.hits = entry.hits + 1
+    if level == "root" then
+        score = 100
+    else if level == "user" then
+        score = 70
+    else if kind == "shell" then
+        score = 50
+    else if kind == "computer" then
+        score = 35
+    else if kind == "file" then
+        score = 30
+    else if kind == "number" then
+        score = 10
+    end if
+    if score > entry.score then entry.score = score
+    entry.source = VULN_DB_SOURCE
+    mark_vuln_dirty(entry.lib + "@" + entry.version)
+end function
+
+
+version_matches = function(version, filter)
+    if filter == "" then return true
+    parts = filter.split("[.]")
+    if parts.len == 1 then return vuln_major(version) == path_component(filter)
+    return str(version) == filter
+end function
+
+
+focus_matches = function(library, version)
+    if globals.focus_library == "" then return true
+    if library.lower != globals.focus_library.lower then return false
+    return version_matches(version, globals.focus_version)
+end function
+
+
+focus_service_token = function()
+    library = globals.focus_library.lower
+    if library == "libssh.so" then return "ssh"
+    if library == "libhttp.so" then return "http"
+    if library == "libsmtp.so" then return "smtp"
+    if library == "libftp.so" then return "ftp"
+    if library == "libcam.so" then return "cam"
+    if library == "libadb.so" then return "adb"
+    if library == "libsmartappliance.so" then return "sappl"
+    return ""
+end function
+
+
+endpoint_matches_focus = function(endpoint)
+    library = globals.focus_library.lower
+    if library == "kernel_router.so" then return endpoint.port == 0
+    if library != "" and endpoint.port == 0 then return false
+    token = focus_service_token
+    if token == "" then return true
+    info = endpoint.info
+    if typeof(info).lower != "string" then return true
+    return info.lower.indexOf(token) != null
+end function
+
+
+research_endpoints = function(router, requested_port = 0)
+    if requested_port > 0 then return service_ports(router, requested_port)
+    if globals.focus_library.lower == "kernel_router.so" then
+        return [{"port": 0, "info": "kernel_router"}]
+    end if
+    endpoints = service_ports(router)
+    // The explicit broad missing hunt covers the router control plane as well
+    // as every visible forwarded service on the sampled public target.
+    if globals.focus_mode != "discover" or globals.focus_library != "" then return endpoints
+    selected = [{"port": 0, "info": "kernel_router"}]
+    for endpoint in endpoints
+        selected.push(endpoint)
+    end for
+    return selected
+end function
+
+
+save_focus = function()
+    file = touch_file(globals.task_folder, "focus.txt")
+    if not is_file(file) then return false
+    line = FOCUS_HEADER + char(10) + "F|" + db_field(globals.focus_mode) + "|" +
+        db_field(globals.focus_library) + "|" + db_field(globals.focus_version)
+    return file.set_content(line) == 1
+end function
+
+
+load_focus = function()
+    globals.focus_mode = "all"
+    globals.focus_library = ""
+    globals.focus_version = ""
+    file = globals.local_computer.File(FOCUS_PATH)
+    if not is_file(file) then return
+    content = file.get_content
+    if typeof(content).lower != "string" then return
+    lines = content.replace(char(13), "").split(char(10))
+    if lines.len < 2 or lines[0].trim != FOCUS_HEADER then return
+    parts = lines[1].trim.split("[|]")
+    if parts.len < 4 or parts[0] != "F" then return
+    globals.focus_mode = parts[1]
+    globals.focus_library = parts[2]
+    globals.focus_version = parts[3]
+end function
+
+
+set_focus = function(mode, library = "", version = "")
+    globals.focus_mode = mode
+    globals.focus_library = library
+    globals.focus_version = version
+    save_focus
+    show_focus
+end function
+
+
+show_focus = function()
+    text = globals.focus_mode
+    if globals.focus_library != "" then text = text + " " + globals.focus_library
+    if globals.focus_version != "" then text = text + " " + globals.focus_version
+    print(paint("Focus: ", COLOR_PURPLE) + paint(text, COLOR_CYAN))
+end function
+
+
+random_public_ip = function()
+    while true
+        ip = floor((rnd * 223) + 1) + "." + floor(rnd * 256) + "." +
+            floor(rnd * 256) + "." + floor((rnd * 254) + 1)
+        if not is_valid_ip(ip) then continue
+        if is_lan_ip(ip) then continue
+        if ip == globals.local_computer.public_ip then continue
+        if globals.seen_targets.hasIndex(ip) then continue
+        globals.seen_targets[ip] = 1
+        return ip
+    end while
+end function
+
+
+random_locator_ip = function()
+    while true
+        ip = floor((rnd * 223) + 1) + "." + floor(rnd * 256) + "." +
+            floor(rnd * 256) + "." + floor((rnd * 254) + 1)
+        if not is_valid_ip(ip) then continue
+        if is_lan_ip(ip) then continue
+        if ip == globals.local_computer.public_ip then continue
+        return ip
+    end while
+end function
+
+
+service_ports = function(router, requested_port = 0)
+    endpoints = []
+    ports = router.used_ports
+    if typeof(ports).lower != "list" then return endpoints
+    for port_object in ports
+        number = port_object.port_number
+        if requested_port > 0 and number != requested_port then continue
+        info = router.port_info(port_object)
+        if typeof(info).lower != "string" then info = "unknown"
+        lan_ip = port_object.get_lan_ip
+        if typeof(lan_ip).lower != "string" then lan_ip = "unknown"
+        endpoints.push({"port": number, "info": info, "lan": lan_ip})
+    end for
+    return endpoints
+end function
+
+
+canonical_locator_library = function(value)
+    library = str(value).trim.lower
+    if library == "kernel_router" then return "kernel_router.so"
+    if library == "http" or library == "libhttp" then return "libhttp.so"
+    if library == "ssh" or library == "libssh" then return "libssh.so"
+    if library == "ftp" or library == "libftp" then return "libftp.so"
+    if library == "smtp" or library == "libsmtp" then return "libsmtp.so"
+    if library.indexOf(".so") == null then library = library + ".so"
+    return library
+end function
+
+
+locator_service_token = function(library)
+    token = canonical_locator_library(library).replace(".so", "")
+    if token.indexOf("lib") == 0 then token = token[3:]
+    return token
+end function
+
+
+locator_is_observable = function(library)
+    if library == "kernel_router.so" then return true
+    // These libraries are internal dependencies rather than public service
+    // identities. A metadata-only sweep cannot honestly locate them.
+    if library == "init.so" then return false
+    if library == "net.so" then return false
+    if library == "kernel_module.so" then return false
+    if library == "aptclient.so" then return false
+    if library == "crypto.so" then return false
+    if library == "metaxploit.so" then return false
+    if library == "libshell.so" then return false
+    return true
+end function
+
+
+service_info_matches = function(info, token, version)
+    if typeof(info).lower != "string" then return false
+    parts = info.trim.split(" ")
+    if parts.len < 2 then return false
+    return parts[0].lower == token.lower and parts[1] == version
+end function
+
+
+locate_on_router = function(router, library, version)
+    kind = typeof(router).lower
+    if kind != "router" and kind != "switch" then return null
+    if library == "kernel_router.so" then
+        observed = router.kernel_version
+        globals.locator_last_version = str(observed)
+        if str(observed) != version then return null
+        return {"port": 0, "lan": router.local_ip, "info": "kernel_router " + str(observed)}
+    end if
+    token = locator_service_token(library)
+    for endpoint in service_ports(router)
+        parts = endpoint.info.trim.split(" ")
+        if parts.len >= 2 and parts[0].lower == token.lower then
+            globals.locator_last_version = endpoint.info
+        end if
+        if not service_info_matches(endpoint.info, token, version) then continue
+        return endpoint
+    end for
+    return null
+end function
+
+
+save_locator_match = function(library, version, ip, match)
+    file = touch_file(globals.finding_folder, "locations.txt")
+    if not is_file(file) then return false
+    content = file.get_content
+    if typeof(content).lower != "string" or content.trim == "" then content = FINDING_HEADER
+    record = "F|" + db_field(current_date) + "|" + db_field(library) + "|" +
+        db_field(version) + "|" + db_field(ip) + "|" + db_field(match.port) + "|" +
+        db_field(match.lan) + "|" + db_field(match.info)
+    if content.indexOf(record) == null then content = content + char(10) + record
+    return file.set_content(content) == 1
+end function
+
+
+show_locator_progress = function(attempts, started, last_ip)
+    elapsed = time - started
+    rate = attempts
+    if elapsed > 0 then rate = attempts / elapsed
+    print(paint("◆ SWEEP ", COLOR_PURPLE) + paint(attempts, COLOR_PINK) +
+        paint("  RATE ", COLOR_PURPLE) + paint(rate, COLOR_GREEN) +
+        paint("/s  LAST ", COLOR_PURPLE) + paint(last_ip, COLOR_CYAN) +
+        paint("  OBSERVED ", COLOR_PURPLE) + paint(globals.locator_last_version, COLOR_ORANGE))
+end function
+
+
+find_exact_library = function(requested_library, version, max_attempts = 0)
+    library = canonical_locator_library(requested_library)
+    if version.trim == "" then
+        print(paint("Usage: find <library> <version> [max-attempts]", COLOR_RED))
+        return false
+    end if
+    if max_attempts < 0 then
+        print(paint("Maximum attempts cannot be negative.", COLOR_RED))
+        return false
+    end if
+    if not locator_is_observable(library) then
+        print(paint("◆ LOCATOR REFUSED", COLOR_RED) + "  " + paint(library, COLOR_PURPLE))
+        print("  " + paint("This is an internal dependency, not a public service identity.", COLOR_ORANGE))
+        print("  " + paint("Use huntlib for vulnerability coverage or acquire it from a known host.", COLOR_GREEN))
+        return false
+    end if
+    globals.locator_last_version = "none"
+    globals.last_locator = null
+    started = time
+    attempts = 0
+    limit_text = "until-match"
+    if max_attempts > 0 then limit_text = str(max_attempts)
+    show_auto_action("EXACT LIBRARY LOCATOR", library + "@" + version, COLOR_PURPLE)
+    print("  " + paint("FILTER", COLOR_PINK) + "  " +
+        paint(locator_service_token(library), COLOR_CYAN) + "  " +
+        paint("LIMIT", COLOR_PINK) + "  " + paint(limit_text, COLOR_ORANGE))
+    print("  " + paint("Metadata sweep only; unrelated services are ignored.", COLOR_GREEN))
+    diag("locator start | library=" + library + " | version=" + version +
+        " | limit=" + limit_text)
+    while max_attempts == 0 or attempts < max_attempts
+        ip = random_locator_ip
+        attempts = attempts + 1
+        router = get_router(ip)
+        if typeof(router).lower != "router" and typeof(router).lower != "switch" then
+            router = get_switch(ip)
+        end if
+        match = locate_on_router(router, library, version)
+        router = null
+        if match != null then
+            save_locator_match(library, version, ip, match)
+            globals.last_locator = {"library": library, "version": version, "ip": ip,
+                "port": match.port, "lan": match.lan, "info": match.info,}
+            elapsed = time - started
+            print(char(10) + paint("◆ EXACT LIBRARY FOUND", COLOR_GREEN))
+            print("  " + paint("LIBRARY", COLOR_PINK) + "  " + paint(library + " " + version, COLOR_PURPLE))
+            print("  " + paint("PUBLIC", COLOR_PINK) + "   " + paint(ip + ":" + match.port, COLOR_CYAN))
+            print("  " + paint("LAN", COLOR_PINK) + "      " + paint(match.lan, COLOR_CYAN))
+            print("  " + paint("SERVICE", COLOR_PINK) + "  " + paint(match.info, COLOR_GREEN))
+            print("  " + paint("SEARCH", COLOR_PINK) + "   attempts=" + paint(attempts, COLOR_CYAN) +
+                "  seconds=" + paint(elapsed, COLOR_ORANGE))
+            print("  " + paint("SAVED", COLOR_PINK) + "    " + paint(FINDING_PATH, COLOR_ORANGE))
+            diag("locator match | library=" + library + " | version=" + version +
+                " | host=" + ip + ":" + match.port + " | lan=" + match.lan +
+                " | attempts=" + attempts + " | seconds=" + elapsed)
+            return true
+        end if
+        if attempts % LOCATOR_PROGRESS_INTERVAL == 0 then
+            show_locator_progress(attempts, started, ip)
+        end if
+    end while
+    elapsed = time - started
+    print(paint("◆ LOCATOR LIMIT REACHED", COLOR_RED) + "  attempts=" +
+        paint(attempts, COLOR_PINK) + "  seconds=" + paint(elapsed, COLOR_ORANGE))
+    diag("locator complete without match | library=" + library + " | version=" + version +
+        " | attempts=" + attempts + " | seconds=" + elapsed)
+    return true
+end function
+
+
+probe_entries = function(session, meta_lib, entries, cleanup_only = false)
+    target_source = null
+    router_source = null
+    helper_shell = null
+    helper_path = ""
+    // net_use and dump_lib already touched the service before this function begins.
+    risk = true
+    attempts = 0
+    limit = MAX_OVERFLOWS_PER_SERVICE
+    if cleanup_only then limit = CLEANUP_ONLY_MAX_OVERFLOWS
+    done = false
+    for entry in ordered_vulns(entries)
+        if attempts >= limit or done then break
+        if not requirement_ready(entry, session) then continue
+        arguments = []
+        if entry.mode == "password" then arguments = [RECON_PASSWORD_INJECT]
+        if entry.mode == "plain" then arguments = ["__AR_PLAIN__"]
+        if entry.mode == "unknown" then arguments = ["__AR_PLAIN__", RECON_PASSWORD_INJECT]
+        for argument in arguments
+            if attempts >= limit then break
+            attempts = attempts + 1
+            globals.stats.overflows = globals.stats.overflows + 1
+            if argument == "__AR_PLAIN__" then
+                result = meta_lib.overflow(entry.region, entry.unsafe)
+            else
+                result = meta_lib.overflow(entry.region, entry.unsafe, argument)
+            end if
+            record_vuln_result(entry, result, not cleanup_only)
+            if is_exploit_object(result) then
+                globals.stats.useful = globals.stats.useful + 1
+                if not is_file(target_source) then target_source = stage_clean_source(result)
+                if is_shell(result) and helper_path == "" then
+                    helper_shell = result
+                    stage = stage_remote_router_source(result)
+                    router_source = stage.source
+                    helper_path = stage.helper
+                end if
+                if cleanup_only and is_file(target_source) and is_file(router_source) then done = true
+            end if
+            result = null
+        end for
+    end for
+    delete_remote_helper(helper_shell, helper_path)
+    helper_shell = null
+    return {"attempts": attempts, "computer_source": target_source,
+        "router_source": router_source, "risk": risk,}
+end function
+
+
+inspect_service = function(ip, endpoint)
+    session = globals.metaxploit.net_use(ip, endpoint.port)
+    if not is_session(session) then
+        globals.stats.residual = globals.stats.residual + 1
+        diag("service unavailable | host=" + ip + ":" + endpoint.port +
+            " | residual_risk=true")
+        return false
+    end if
+    globals.stats.services = globals.stats.services + 1
+    meta_lib = session.dump_lib
+    if not is_meta_lib(meta_lib) then
+        session = null
+        wait(FINALIZER_WAIT_SECONDS)
+        globals.stats.residual = globals.stats.residual + 1
+        diag("library unavailable | host=" + ip + ":" + endpoint.port +
+            " | residual_risk=true")
+        return false
+    end if
+    library = meta_lib.lib_name
+    version = str(meta_lib.version)
+    globals.stats.libraries = globals.stats.libraries + 1
+    focus_match = focus_matches(library, version)
+    state = coverage_state(library, version)
+    if not focus_match then
+        diag("library skipped | host=" + ip + ":" + endpoint.port + " | library=" +
+            library + "@" + version + " | reason=focus-mismatch | cleanup=known-only")
+    end if
+    state_color = COLOR_ORANGE
+    if state == "complete" then state_color = COLOR_GREEN
+    if state == "unknown" then state_color = COLOR_PURPLE
+    print("  " + paint(ip + ":" + endpoint.port, COLOR_CYAN) + "  " +
+        paint(library + " " + version, COLOR_PINK) + "  " + paint(state.upper, state_color))
+    cleanup_only = not focus_match
+    if globals.focus_mode == "discover" and state != "unknown" then
+        globals.stats.complete_skips = globals.stats.complete_skips + 1
+        diag("version already cataloged skip | host=" + ip + ":" + endpoint.port +
+            " | library=" + library + "@" + version + " | state=" + state +
+            " | cleanup=known-only")
+        cleanup_only = true
+    else if state == "complete" and globals.focus_mode != "force" then
+        globals.stats.complete_skips = globals.stats.complete_skips + 1
+        diag("coverage complete skip | host=" + ip + ":" + endpoint.port +
+            " | library=" + library + "@" + version + " | cleanup=known-only")
+        cleanup_only = true
+    end if
+    if state == "partial" then globals.stats.partial = globals.stats.partial + 1
+    if state == "unknown" then globals.stats.unknown = globals.stats.unknown + 1
+    fingerprint = remember_fingerprint(library, version)
+    entries = globals.vulns[fingerprint]
+    if focus_match and not cleanup_only then
+        entries = scan_vulnerabilities(globals.metaxploit, meta_lib, globals.focus_mode == "force")
+    end if
+    probe = probe_entries(session, meta_lib, entries, cleanup_only)
+    session = null
+    meta_lib = null
+    entries = null
+    wait(FINALIZER_WAIT_SECONDS)
+    computer_ok = clean_source(probe.computer_source)
+    router_ok = clean_source(probe.router_source)
+    if computer_ok then
+        globals.stats.target_computer_clean = globals.stats.target_computer_clean + 1
+    end if
+    if router_ok then globals.stats.target_router_clean = globals.stats.target_router_clean + 1
+    if probe.risk and not computer_ok then globals.stats.residual = globals.stats.residual + 1
+    mode_name = "research"
+    if cleanup_only then mode_name = "known-only"
+    diag("target cleanup | attempted=" + probe.attempts + " | computer=" + computer_ok +
+        " | router=" + router_ok + " | residual_risk=" + (probe.risk and not computer_ok) +
+        " | mode=" + mode_name)
+    probe = null
+    save_research
+    return true
+end function
+
+
+scan_target = function(ip, requested_port = 0)
+    if not prepare_execution_cleanup then
+        print(paint("Execution-computer cleanup is unavailable; recon stopped.", COLOR_RED))
+        return false
+    end if
+    globals.stats.targets = globals.stats.targets + 1
+    print(char(10) + paint("Target ", COLOR_PURPLE) + paint(ip, COLOR_CYAN))
+    router = get_router(ip)
+    if typeof(router).lower != "router" then
+        diag("target unavailable | host=" + ip)
+        clean_execution_route
+        return true
+    end if
+    globals.stats.routers = globals.stats.routers + 1
+    endpoints = research_endpoints(router, requested_port)
+    if endpoints.len == 0 then
+        diag("target has no selected services | host=" + ip + " | port=" + requested_port)
+        clean_execution_route
+        return true
+    end if
+    for endpoint in endpoints
+        if not endpoint_matches_focus(endpoint) then
+            globals.stats.prefilter_skips = globals.stats.prefilter_skips + 1
+            diag("service prefilter skip | host=" + ip + ":" + endpoint.port +
+                " | info=" + endpoint.info + " | focus=" + globals.focus_library +
+                " | service_net_use=0")
+            continue
+        end if
+        inspect_service(ip, endpoint)
+    end for
+    if not clean_execution_route then return false
+    return true
+end function
+
+
+hunt = function(count)
+    if count < 1 or count > MAX_HUNT_COUNT then
+        print(paint("Hunt count must be between 1 and " + MAX_HUNT_COUNT + ".", COLOR_RED))
+        return false
+    end if
+    reset_stats
+    diag("hunt start | count=" + count + " | focus=" + globals.focus_mode +
+        " | library=" + globals.focus_library + " | version=" + globals.focus_version)
+    number = 1
+    while number <= count
+        ip = random_public_ip
+        if not scan_target(ip) then break
+        number = number + 1
+    end while
+    save_research
+    show_summary
+    return true
+end function
+
+
+hunt_with_focus = function(mode, library, version, count)
+    old_mode = globals.focus_mode
+    old_library = globals.focus_library
+    old_version = globals.focus_version
+    globals.focus_mode = mode
+    globals.focus_library = library
+    globals.focus_version = version
+    result = hunt(count)
+    globals.focus_mode = old_mode
+    globals.focus_library = old_library
+    globals.focus_version = old_version
+    return result
+end function
+
+
+load_library_coverage = function(library)
+    if not globals.authoritative_db then return
+    for key in globals.vuln_index.indexes
+        entry = globals.vuln_index[key]
+        if entry.lib.lower != library.lower then continue
+        load_vuln_bucket_values(entry.lib, entry.major + ".0.0")
+    end for
+end function
+
+
+show_coverage = function(library, version_filter = "")
+    load_library_coverage(library)
+    print(paint("Coverage " + library, COLOR_PURPLE))
+    found = 0
+    complete = 0
+    partial = 0
+    for fingerprint in globals.vuln_meta.indexes
+        meta = globals.vuln_meta[fingerprint]
+        if meta[0].lower != library.lower then continue
+        if not version_matches(meta[1], version_filter) then continue
+        state = coverage_state(meta[0], meta[1])
+        color = COLOR_ORANGE
+        if state == "complete" then
+            color = COLOR_GREEN
+            complete = complete + 1
+        else
+            partial = partial + 1
+        end if
+        count = globals.vulns[fingerprint].len
+        print("  " + paint(meta[0] + " " + meta[1], COLOR_CYAN) + "  " +
+            paint(state.upper, color) + "  entries=" + count)
+        found = found + 1
+    end for
+    print("Observed versions: " + paint(found, COLOR_CYAN) + "  complete=" +
+        paint(complete, COLOR_GREEN) + "  partial=" + paint(partial, COLOR_ORANGE))
+end function
+
+
+export_coverage = function()
+    if not globals.authoritative_db then
+        print(paint("Coverage export requires the authoritative /root/vulndb host.", COLOR_RED))
+        return false
+    end if
+    for key in globals.vuln_index.indexes
+        entry = globals.vuln_index[key]
+        load_vuln_bucket_values(entry.lib, entry.major + ".0.0")
+    end for
+    lines = [COVERAGE_HEADER]
+    size = COVERAGE_HEADER.len
+    number = 1
+    versions = 0
+    for fingerprint in globals.vuln_meta.indexes
+        meta = globals.vuln_meta[fingerprint]
+        prefix = "P"
+        if globals.vuln_scanned.hasIndex(fingerprint) then prefix = "S"
+        line = prefix + "|" + db_field(meta[0]) + "|" + db_field(meta[1])
+        if size + line.len + 1 > VULN_DB_SHARD_LIMIT and lines.len > 1 then
+            file = touch_file(globals.sync_folder, COVERAGE_SHARD_PREFIX + pad4(number) + ".txt")
+            if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return false
+            number = number + 1
+            lines = [COVERAGE_HEADER]
+            size = COVERAGE_HEADER.len
+        end if
+        lines.push(line)
+        size = size + line.len + 1
+        versions = versions + 1
+    end for
+    file = touch_file(globals.sync_folder, COVERAGE_SHARD_PREFIX + pad4(number) + ".txt")
+    if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return false
+    existing = globals.sync_folder.get_files
+    if typeof(existing).lower == "list" then
+        for old in existing
+            if old.name.indexOf(COVERAGE_SHARD_PREFIX) != 0 then continue
+            shard_number = old.name.replace(COVERAGE_SHARD_PREFIX, "").replace(".txt", "").to_int
+            if typeof(shard_number).lower == "number" and shard_number > number then old.delete
+        end for
+    end if
+    index = touch_file(globals.sync_folder, "coverage-index.txt")
+    if is_file(index) then
+        index.set_content(COVERAGE_INDEX_HEADER + char(10) + "S|" + number + char(10) +
+            "V|" + versions)
+    end if
+    diag("coverage export complete | versions=" + versions + " | shards=" + number +
+        " | path=" + SYNC_ROOT)
+    return true
+end function
+
+
+prepare_import_bucket = function(content)
+    if typeof(content).lower != "string" then return
+    for line in content.replace(char(13), "").split(char(10))
+        parts = line.trim.split("[|]")
+        if parts.len < 3 then continue
+        if parts[0] != "S" and parts[0] != "V" then continue
+        load_vuln_bucket_values(parts[1], parts[2])
+    end for
+end function
+
+
+import_inbox = function()
+    if not globals.authoritative_db then
+        print(paint("Inbox import requires the authoritative /root/vulndb host.", COLOR_RED))
+        return false
+    end if
+    files = globals.inbox_folder.get_files
+    if typeof(files).lower != "list" then return false
+    accepted = []
+    records = 0
+    for file in files
+        if file.name.indexOf(OUTBOX_SHARD_PREFIX) != 0 then continue
+        content = file.get_content
+        if typeof(content).lower != "string" then continue
+        lines = content.replace(char(13), "").split(char(10))
+        if lines.len == 0 or lines[0].trim != OUTBOX_HEADER then continue
+        prepare_import_bucket(content)
+        records = records + load_vuln_content(content, "import")
+        accepted.push(file)
+    end for
+    if accepted.len == 0 then
+        print(paint("No compatible AutoRecon inbox shards found.", COLOR_ORANGE))
+        return true
+    end if
+    if not save_vulns then
+        print(paint("Import save failed; inbox files were preserved.", COLOR_RED))
+        return false
+    end if
+    for file in accepted
+        file.delete
+    end for
+    diag("import complete | shards=" + accepted.len + " | new_entries=" + records)
+    return true
+end function
+
+
+show_outbox = function()
+    print(paint("AutoRecon outbox", COLOR_PURPLE))
+    print("Path: " + paint(OUTBOX_ROOT, COLOR_CYAN))
+    print("Fingerprints waiting: " + paint(globals.outbox_fingerprints.indexes.len, COLOR_ORANGE))
+    files = globals.outbox_folder.get_files
+    if typeof(files).lower == "list" then
+        for file in files
+            print("  " + file.name + "  size=" + file.size)
+        end for
+    end if
+end function
+
+
+show_summary = function()
+    print(char(10) + paint("AutoRecon results", COLOR_PURPLE))
+    print("Targets attempted:      " + paint(globals.stats.targets, COLOR_CYAN))
+    print("Services examined:      " + paint(globals.stats.services, COLOR_CYAN))
+    print("Library versions seen:  " + paint(globals.stats.libraries, COLOR_CYAN))
+    print("Complete versions skip: " + paint(globals.stats.complete_skips, COLOR_GREEN))
+    print("Partial versions filled:" + paint(globals.stats.partial, COLOR_ORANGE))
+    print("Unknown versions found: " + paint(globals.stats.unknown, COLOR_PURPLE))
+    print("Fresh scans completed:  " + paint(globals.stats.fresh_scans, COLOR_PURPLE))
+    print("Unique vulns added:     " + paint(globals.stats.new_vulns, COLOR_GREEN))
+    print("Overflow attempts:      " + paint(globals.stats.overflows, COLOR_PINK))
+    print("Useful object results:  " + paint(globals.stats.useful, COLOR_GREEN))
+    print("Services prefiltered:   " + paint(globals.stats.prefilter_skips, COLOR_GREEN))
+    print("Target computer cleans: " + paint(globals.stats.target_computer_clean, COLOR_ORANGE))
+    print("Target router cleans:   " + paint(globals.stats.target_router_clean, COLOR_ORANGE))
+    print("Execution host cleans:  " + paint(globals.stats.execution_computer_clean, COLOR_GREEN))
+    print("Execution router cleans:" + paint(globals.stats.execution_router_clean, COLOR_GREEN))
+    print("Residual-risk services: " + paint(globals.stats.residual, COLOR_RED))
+    if globals.authoritative_db then
+        print("Research destination:   " + paint(VULN_DB_ROOT, COLOR_PURPLE))
+    else
+        print("Research destination:   " + paint(OUTBOX_ROOT, COLOR_ORANGE))
+    end if
+end function
+
+
+show_status = function()
+    print(paint("AutoRecon " + SCRIPT_VERSION, COLOR_PURPLE))
+    print("Execution host: " + paint(globals.local_computer.public_ip + "/" +
+        globals.local_computer.local_ip, COLOR_CYAN))
+    vdb_color = COLOR_ORANGE
+    if globals.authoritative_db then vdb_color = COLOR_GREEN
+    print("Authoritative VDB: " + paint(globals.authoritative_db, vdb_color))
+    print("Known fingerprints: " + globals.vuln_meta.indexes.len)
+    print("Outbox fingerprints: " + globals.outbox_fingerprints.indexes.len)
+    if globals.last_locator != null then
+        print("Last exact locator: " + paint(globals.last_locator.library + " " +
+            globals.last_locator.version, COLOR_PURPLE) + " at " +
+            paint(globals.last_locator.ip + ":" + globals.last_locator.port, COLOR_CYAN))
+    else
+        print("Last exact locator: " + paint("none", COLOR_ORANGE))
+    end if
+    print("Locator records: " + paint(FINDING_PATH, COLOR_ORANGE))
+    show_focus
+end function
+
+
+console_prompt = function()
+    mode = "OUTBOX"
+    if globals.authoritative_db then mode = "ACVDB3"
+    state = "FOCUS " + globals.focus_mode.upper
+    if globals.focus_library != "" then state = state + " " + globals.focus_library
+    if globals.last_locator != null then state = "FOUND " + globals.last_locator.library + "@" + globals.last_locator.version
+    print(paint("╭─◆ AUTORECON ◆─", COLOR_PURPLE) + paint("[" + mode + "]", COLOR_GREEN) +
+        paint("─[" + state + "]", COLOR_PINK))
+    destination = VULN_DB_ROOT
+    if not globals.authoritative_db then destination = OUTBOX_ROOT
+    line = paint("╰─ORIGIN ", COLOR_ORANGE) +
+        paint(globals.local_computer.public_ip + "/" + globals.local_computer.local_ip, COLOR_CYAN) +
+        paint(" ─▶ RESEARCH ", COLOR_GREEN) + paint(destination, COLOR_PURPLE) +
+        paint(" ─▶ ", COLOR_GREEN)
+    return user_input(line).trim
+end function
+
+
+show_help = function()
+    print(paint("AutoRecon commands", COLOR_PURPLE))
+    print("  " + paint("hunt [count]", COLOR_GREEN) + "                       scan random public targets")
+    print("  " + paint("hunt focus <lib> [version] [count]", COLOR_GREEN) + " scan only one library family")
+    print("  " + paint("hunt focus missing [count]", COLOR_GREEN) + "         discover uncataloged exact versions")
+    print("  " + paint("target <ip> [port]", COLOR_GREEN) + "                 scan one exact target")
+    print("  " + paint("focus missing <lib> [version]", COLOR_CYAN) + "      skip completed exact versions")
+    print("  " + paint("focus <lib> [version]", COLOR_CYAN) + "              focus one library and fill gaps")
+    print("  " + paint("focus all", COLOR_CYAN) + "                          clear the library filter")
+    print("  " + paint("rescan <lib> [version]", COLOR_ORANGE) + "             force fresh scans")
+    print("  " + paint("huntlib <lib> [version] [count]", COLOR_GREEN) + "    temporary missing-version hunt")
+    print("  " + paint("coverage <lib> [version]", COLOR_PURPLE) + "          list complete and partial versions")
+    print("  " + paint("find <lib> <version> [max-attempts]", COLOR_GREEN) + " locate an exact library in the wild")
+    print("  " + paint("export", COLOR_ORANGE) + "                             write a compact coverage seed")
+    print("  " + paint("import", COLOR_ORANGE) + "                             merge synced inbox shards into ACVDB3")
+    print("  " + paint("outbox", COLOR_ORANGE) + "                             show unsynchronized research")
+    print("  " + paint("fresh", COLOR_ORANGE) + "                              reset focus and run counters only")
+    print("  " + paint("status", COLOR_CYAN) + "                             show database and focus state")
+    print("  " + paint("quit", COLOR_RED) + "                               save, clean, and exit")
+end function
+
+
+dispatch = function(words)
+    if words.len == 0 then return true
+    command = words[0].lower
+    if command == "hunt" then
+        if words.len > 1 and words[1].lower == "focus" then
+            if words.len < 3 then
+                print(paint("Usage: hunt focus <library> [version] [count]", COLOR_RED))
+                print(paint("   or: hunt focus missing [count]", COLOR_RED))
+                return false
+            end if
+            if words[2].lower == "missing" then
+                count = DEFAULT_HUNT_COUNT
+                if words.len > 3 then
+                    if not digits_only(words[3]) then
+                        print(paint("Usage: hunt focus missing [count]", COLOR_RED))
+                        return false
+                    end if
+                    count = words[3].to_int
+                end if
+                if words.len > 4 then
+                    print(paint("Usage: hunt focus missing [count]", COLOR_RED))
+                    return false
+                end if
+                return hunt_with_focus("discover", "", "", count)
+            end if
+            library = words[2]
+            version = ""
+            count = DEFAULT_HUNT_COUNT
+            if words.len > 3 then
+                if digits_only(words[3]) then count = words[3].to_int else version = words[3]
+            end if
+            if words.len > 4 then
+                if not digits_only(words[4]) then
+                    print(paint("Usage: hunt focus <library> [version] [count]", COLOR_RED))
+                    return false
+                end if
+                count = words[4].to_int
+            end if
+            if words.len > 5 then
+                print(paint("Usage: hunt focus <library> [version] [count]", COLOR_RED))
+                return false
+            end if
+            return hunt_with_focus("missing", library, version, count)
+        end if
+        count = DEFAULT_HUNT_COUNT
+        if words.len > 1 and digits_only(words[1]) then count = words[1].to_int
+        return hunt(count)
+    else if command == "target" then
+        if words.len < 2 or not is_valid_ip(words[1]) then
+            print(paint("Usage: target <ip> [port]", COLOR_RED))
+            return false
+        end if
+        port = 0
+        if words.len > 2 and digits_only(words[2]) then port = words[2].to_int
+        reset_stats
+        result = scan_target(words[1], port)
+        save_research
+        show_summary
+        return result
+    else if command == "focus" then
+        if words.len < 2 then
+            show_focus
+            return true
+        end if
+        if words[1].lower == "all" then
+            set_focus("all")
+            return true
+        end if
+        if words[1].lower == "missing" then
+            if words.len < 3 then
+                print(paint("Usage: focus missing <library> [version]", COLOR_RED))
+                return false
+            end if
+            version = ""
+            if words.len > 3 then version = words[3]
+            set_focus("missing", words[2], version)
+            return true
+        end if
+        version = ""
+        if words.len > 2 then version = words[2]
+        set_focus("library", words[1], version)
+        return true
+    else if command == "rescan" then
+        if words.len < 2 then
+            print(paint("Usage: rescan <library> [version]", COLOR_RED))
+            return false
+        end if
+        version = ""
+        if words.len > 2 then version = words[2]
+        set_focus("force", words[1], version)
+        return true
+    else if command == "huntlib" then
+        if words.len < 2 then
+            print(paint("Usage: huntlib <library> [version] [count]", COLOR_RED))
+            return false
+        end if
+        library = words[1]
+        version = ""
+        count = DEFAULT_HUNT_COUNT
+        if words.len > 2 then
+            if digits_only(words[2]) then count = words[2].to_int else version = words[2]
+        end if
+        if words.len > 3 and digits_only(words[3]) then count = words[3].to_int
+        return hunt_with_focus("missing", library, version, count)
+    else if command == "coverage" then
+        if words.len < 2 then
+            print(paint("Usage: coverage <library> [version]", COLOR_RED))
+            return false
+        end if
+        version = ""
+        if words.len > 2 then version = words[2]
+        show_coverage(words[1], version)
+        return true
+    else if command == "find" then
+        if words.len < 3 or words.len > 4 then
+            print(paint("Usage: find <library> <version> [max-attempts]", COLOR_RED))
+            return false
+        end if
+        attempts = 0
+        if words.len > 3 then
+            if not digits_only(words[3]) then
+                print(paint("Maximum attempts must be a whole number.", COLOR_RED))
+                return false
+            end if
+            attempts = words[3].to_int
+        end if
+        return find_exact_library(words[1], words[2], attempts)
+    else if command == "export" then
+        return export_coverage
+    else if command == "import" then
+        return import_inbox
+    else if command == "outbox" then
+        show_outbox
+        return true
+    else if command == "fresh" then
+        reset_stats
+        set_focus("all")
+        diag("fresh run state | database and outbox preserved")
+        return true
+    else if command == "status" then
+        show_status
+        return true
+    else if command == "help" or command == "?" or command == "-h" or
+        command == "--help" then
+        show_help
+        return true
+    else if command == "quit" or command == "exit" or command == "q" then
+        return false
+    end if
+    print(paint("Unknown command. Type help.", COLOR_RED))
+    return true
+end function
+
+
+if params.len > 0 and params[0] == "--router-clean-helper" then router_helper_mode
+
+globals.local_shell = get_shell
+globals.local_computer = globals.local_shell.host_computer
+globals.metaxploit = include_lib("/lib/metaxploit.so")
+globals.execution_computer_source = null
+globals.execution_router_source = null
+globals.seen_targets = {}
+globals.last_locator = null
+globals.locator_last_version = "none"
+reset_stats
+
+if typeof(globals.metaxploit).lower != "metaxploitlib" then exit("MetaSploit provider unavailable.")
+if not init_layout then exit("AutoRecon could not create /root/autoscripts/autorecon.")
+if not init_log then exit("AutoRecon diagnostic log unavailable.")
+init_vulns
+load_focus
+
+show_banner
+print(paint("AutoRecon " + SCRIPT_VERSION, COLOR_PURPLE))
+print("Logs: " + paint(LOG_ROOT + "/latest.txt", COLOR_ORANGE))
+if globals.authoritative_db then
+    print("Research mode: " + paint("direct ACVDB3", COLOR_GREEN))
+else
+    print("Research mode: " + paint("endpoint outbox", COLOR_ORANGE))
+end if
+show_focus
+
+if params.len > 0 then
+    words = []
+    for word in params
+        if word.trim != "" then words.push(word.trim)
+    end for
+    dispatch(words)
+    save_research
+    flush_log
+    exit
+end if
+
+show_help
+while true
+    raw = console_prompt
+    words = []
+    for word in raw.split(" ")
+        if word.trim != "" then words.push(word.trim)
+    end for
+    if words.len > 0 and (words[0].lower == "quit" or words[0].lower == "exit" or
+        words[0].lower == "q") then break
+    dispatch(words)
+    // Keep latest.txt current even while the interactive prompt remains open.
+    flush_log
+end while
+
+save_research
+if is_file(globals.execution_computer_source) then clean_execution_route
+flush_log
+print(paint("AutoRecon closed.", COLOR_PURPLE))
+exit

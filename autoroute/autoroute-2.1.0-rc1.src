@@ -1,11 +1,11 @@
-//Made By Hobo
-// AutoRoute 2.0.0 owned-route and AutoNet proxy controller for Grey Hack Public v0.9.6773.
+//Made By Hobo & Rowan
+// AutoRoute 2.1.0-rc1 owned-route and AutoNet proxy controller for Grey Hack Public v0.9.6773.
 //
 // First run asks for an ordered SSH route and saves it outside the source.
 // AutoRoute keeps that trusted chain separate from the verified AutoNet node
 // database, then optionally extends and collapses a temporary proxy layer.
 
-SCRIPT_VERSION = "2.0.0"
+SCRIPT_VERSION = "2.1.0-rc1"
 
 AUTOSCRIPTS_ROOT = "/root/autoscripts"
 NETWORK_ROOT = "/root/autoscripts/network"
@@ -20,7 +20,7 @@ NETWORK_INDEX_HEADER = "ASNETINDEX1"
 ROUTE_HEADER = "ASOWNED1"
 MAX_HOPS = 8
 DEFAULT_HOPS = 2
-MAX_PROXY_HOPS = 12
+MAX_PROXY_HOPS = 50
 DEFAULT_PROXY_HOPS = 3
 DEFAULT_SSH_PORT = 22
 HELPER_WAIT_SECONDS = 60
@@ -645,11 +645,17 @@ end function
 
 
 remove_proxy_seed_helper = function()
-    if globals.proxy_seed_helper_path == "" then return
+    if globals.proxy_seed_helper_path == "" then return true
+    cleaned = true
     if globals.shells.len > 0 then
         delete_remote_helper(globals.shells[-1], globals.proxy_seed_helper_path)
+        // File deletion creates a new system.log entry. Give that event time to
+        // settle, then make the retained cleaner the final filesystem action.
+        wait(FINALIZER_WAIT_SECONDS)
+        cleaned = clean_stage(globals.shells.len - 1)
     end if
     globals.proxy_seed_helper_path = ""
+    return cleaned
 end function
 
 
@@ -672,10 +678,20 @@ stage_proxy_helper_seed = function()
         next_path = deploy_helper(source_shell, source_path, remote_shell)
         if next_path == "" then
             delete_remote_helper(staged_shell, staged_path)
+            if is_shell(staged_shell) and staged_path != "" then
+                wait(FINALIZER_WAIT_SECONDS)
+                clean_stage(index - 1)
+            end if
             print(paint("Could not stage the proxy helper on the owned route.", COLOR_RED))
             return ""
         end if
         delete_remote_helper(staged_shell, staged_path)
+        if is_shell(staged_shell) and staged_path != "" then
+            // The removed copy is itself logged on this owned hop. Clean only
+            // after deletion so no helper-removal entry survives propagation.
+            wait(FINALIZER_WAIT_SECONDS)
+            clean_stage(index - 1)
+        end if
         staged_shell = remote_shell
         staged_path = next_path
         source_shell = remote_shell
@@ -831,11 +847,11 @@ extend_proxy = function(requested)
         previous_index = globals.proxy_nodes.len - 2
         if previous_index < 0 then
             remove_proxy_seed_helper
-            clean_stage(globals.shells.len - 1)
         else
             delete_remote_helper(globals.proxy_shells[previous_index],
                 globals.proxy_helper_paths[previous_index])
             globals.proxy_helper_paths[previous_index] = ""
+            wait(FINALIZER_WAIT_SECONDS)
             clean_proxy_stage(previous_index)
         end if
         previous_shell = connected
@@ -846,6 +862,7 @@ extend_proxy = function(requested)
     delete_remote_helper(globals.proxy_shells[last], globals.proxy_helper_paths[last])
     globals.proxy_helper_paths[last] = ""
     remove_proxy_seed_helper
+    wait(FINALIZER_WAIT_SECONDS)
     clean_proxy_stage(last)
     print(paint("Proxy route ready.", COLOR_GREEN) + "  active-hops=" +
         paint(globals.proxy_nodes.len, COLOR_CYAN))

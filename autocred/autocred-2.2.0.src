@@ -1,0 +1,2892 @@
+//Made By Hobo
+// AutoCred targeted credential worker
+// Release build for Grey Hack Public v0.9.6773.
+//
+// This handles the classic "Mission Contract" credential jobs. The newer
+// procedural Fraud/Sabotage/Corporate Espionage missions are multi-stage and
+// intentionally are not treated as credential contracts here.
+//
+// One command, one PIN, one selection. A short-lived child process rebuilds the
+// current MetaMail snapshot on every invocation and every fresh/refresh request;
+// completed jobs are never loaded from an old task file.
+
+SCRIPT_VERSION = "2.2.0"
+
+// Empty mail fields are prompted at runtime; an empty PIN disables the PIN
+// check. Keeping secrets out of source is recommended. Password/PIN prompts
+// use user_input(..., 1) so their input is masked.
+MAIL_USER = ""
+MAIL_PASSWORD = ""
+PIN = ""
+
+MAX_MAILS = 100
+AUTOSCRIPTS_ROOT = "/root/autoscripts"
+APP_ROOT = "/root/autoscripts/credential"
+TASK_ROOT = "/root/autoscripts/credential/tasks"
+TASK_PATH = "/root/autoscripts/credential/tasks/current.txt"
+TASK_HEADER = "ACTASK1"
+LOG_ROOT = "/root/autoscripts/credential/logs"
+DEBUG_FILE_PREFIX = "latest"
+DEBUG_FILE_LIMIT = 150000
+DEBUG_FLUSH_LINES = 12
+MAIL_INTAKE_REQUEST_PREFIX = "mail-intake-request-"
+MAIL_INTAKE_SNAPSHOT_PREFIX = "mail-intake-snapshot-"
+MAIL_INTAKE_SNAPSHOT_HEADER = "ACMAIL2"
+MAIL_INTAKE_WAIT = 30
+
+VULN_DB_ROOT = "/root/vulndb"
+VULN_DB_INDEX_PATH = "/root/vulndb/index.txt"
+VULN_DB_INDEX_HEADER = "ACVDBINDEX3"
+VULN_DB_V2_INDEX_HEADER = "ACVDBINDEX2"
+VULN_DB_LEGACY_INDEX_HEADER = "ACVDBINDEX1"
+VULN_DB_LEGACY_SHARD_PREFIX = "vulns-"
+VULN_DB_SHARD_PREFIX = "shard-"
+VULN_DB_SHARD_LIMIT = 120000
+VULN_DB_SOURCE = "autocred"
+
+LOG_FINALIZER_WAIT = 2
+MAX_ROUTE_SHELLS = 12
+MAX_OBJECTS_PER_ENDPOINT = 24
+CREDENTIAL_INJECT = "ac2026"
+
+// Optional router-jump library. Leave blank to disable. The file must exist on
+// the execution server. AutoCred only installs it after root is proven on a
+// router and only uses it to reach the contract LAN address.
+POISON_HTTP_SOURCE = ""
+
+COLOR_PURPLE = "#D86CFF"
+COLOR_CYAN = "#55E7FF"
+COLOR_GREEN = "#63FF9B"
+COLOR_RED = "#FF5C7C"
+COLOR_ORANGE = "#FFB86B"
+COLOR_PINK = "#FF79C6"
+
+
+is_shell_type = function(kind)
+    // overflow documents full shell/computer/file return objects. Partial and
+    // FTP variants expose different members, so do not call full-object APIs on
+    // them without an exploit-specific adapter.
+    return kind == "shell"
+end function
+
+
+is_ftp_shell_type = function(kind)
+    return kind.lower == "ftpshell"
+end function
+
+
+is_computer_type = function(kind)
+    return kind.lower == "computer"
+end function
+
+
+is_file_type = function(kind)
+    return kind.lower == "file"
+end function
+
+
+is_router_type = function(kind)
+    return kind.lower == "router"
+end function
+
+
+is_switch_type = function(kind)
+    return kind.lower == "switch"
+end function
+
+
+is_route_device = function(value)
+    kind = typeof(value)
+    return is_router_type(kind) or is_switch_type(kind)
+end function
+
+
+is_net_session = function(value)
+    return typeof(value).lower == "netsession"
+end function
+
+
+is_meta_lib = function(value)
+    return typeof(value).lower == "metalib"
+end function
+
+
+is_metaxploit = function(value)
+    return typeof(value).lower == "metaxploitlib"
+end function
+
+
+is_exploit_object = function(value)
+    kind = typeof(value)
+    if is_shell_type(kind) then return true
+    if is_ftp_shell_type(kind) then return true
+    if is_computer_type(kind) then return true
+    if is_file_type(kind) then return true
+    return false
+end function
+
+
+join_path = function(folder, name)
+    if folder == "/" then return "/" + name
+    if folder[-1] == "/" then return folder + name
+    return folder + "/" + name
+end function
+
+
+paint = function(value, color)
+    return "<color=" + color + ">" + str(value) + "</color>"
+end function
+
+
+yes_no = function(value)
+    if value then return "yes"
+    return "no"
+end function
+
+
+add_unique_number = function(values, number)
+    if typeof(number).lower != "number" then return
+    if values.indexOf(number) == null then values.push(number)
+end function
+
+
+add_unique_string = function(values, value)
+    if typeof(value).lower != "string" then return
+    if value == "" then return
+    if values.indexOf(value) == null then values.push(value)
+end function
+
+
+show_usage = function()
+    binary_name = program_path.split("/")[-1]
+    return "Usage: " + binary_name
+end function
+
+
+root_file = function(value)
+    kind = typeof(value)
+
+    if is_shell_type(kind) then
+        computer = computer_from_value(value)
+        if not computer then return null
+        return computer.File("/")
+    end if
+
+    if is_ftp_shell_type(kind) then
+        computer = computer_from_value(value)
+        if not computer then return null
+        return computer.File("/")
+    end if
+
+    if is_computer_type(kind) then
+        return value.File("/")
+    end if
+
+    if is_file_type(kind) then
+        node = value
+        while node.parent
+            node = node.parent
+        end while
+        return node
+    end if
+
+    return null
+end function
+
+
+computer_from_value = function(value)
+    kind = typeof(value)
+    if is_shell_type(kind) or is_ftp_shell_type(kind) then
+        host = value.host_computer
+        if is_computer_type(typeof(host)) then return host
+        return null
+    end if
+    if is_computer_type(kind) then return value
+    return null
+end function
+
+
+passwd_file_from = function(value)
+    computer = computer_from_value(value)
+    if computer then return computer.File("/etc/passwd")
+    root = root_file(value)
+    if not root then return null
+    return resolve_from_root(root, "/etc/passwd")
+end function
+
+
+// Resolve an absolute path without an unbounded loop. This also works when an
+// exploit returns a file object rather than a computer or shell.
+resolve_from_root = function(root, path)
+    if not is_file_type(typeof(root)) then return null
+    if path == "/" then return root
+    if path == "" then return null
+    if path[0] != "/" then return null
+
+    node = root
+    for part in path.split("/")
+        if part == "" then continue
+        if not node.is_folder then return null
+
+        children = []
+        folders = node.get_folders
+        files = node.get_files
+        if typeof(folders) == "list" then children = children + folders
+        if typeof(files) == "list" then children = children + files
+
+        next_node = null
+        for child in children
+            if child.name == part then
+                next_node = child
+                break
+            end if
+        end for
+
+        if not next_node then return null
+        node = next_node
+    end for
+
+    return node
+end function
+
+
+ensure_local_folder = function(parent_path, name)
+    parent = globals.local_computer.File(parent_path)
+    if not is_file_type(typeof(parent)) then return null
+    if not parent.is_folder then return null
+    path = join_path(parent.path, name)
+    folder = globals.local_computer.File(path)
+    if is_file_type(typeof(folder)) then
+        if folder.is_folder then return folder
+        return null
+    end if
+    if not parent.has_permission("w") then return null
+    if not parent.has_permission("x") then return null
+    globals.local_computer.create_folder(parent.path, name)
+    folder = globals.local_computer.File(path)
+    if is_file_type(typeof(folder)) then
+        if folder.is_folder then return folder
+    end if
+    return null
+end function
+
+
+init_runtime_storage = function()
+    globals.autoscripts_folder = ensure_local_folder("/root", "autoscripts")
+    globals.app_folder = null
+    globals.task_folder = null
+    globals.log_folder = null
+    if is_file_type(typeof(globals.autoscripts_folder)) then
+        globals.app_folder = ensure_local_folder(globals.autoscripts_folder.path, "credential")
+    end if
+    if is_file_type(typeof(globals.app_folder)) then
+        globals.task_folder = ensure_local_folder(globals.app_folder.path, "tasks")
+        globals.log_folder = ensure_local_folder(globals.app_folder.path, "logs")
+    end if
+    globals.vuln_db_folder = ensure_local_folder("/root", "vulndb")
+
+    if is_file_type(typeof(globals.task_folder)) then
+        print(paint("Tasks: " + globals.task_folder.path, COLOR_ORANGE))
+    else
+        print(paint("Task folder unavailable; current queue is memory-only.", COLOR_RED))
+    end if
+    if is_file_type(typeof(globals.log_folder)) then
+        print(paint("Diagnostics: " + globals.log_folder.path, COLOR_ORANGE))
+    else
+        print(paint("Log folder unavailable; terminal diagnostics only.", COLOR_RED))
+    end if
+    if is_file_type(typeof(globals.vuln_db_folder)) then
+        print(paint("Shared vulnerability database: " + globals.vuln_db_folder.path, COLOR_PURPLE))
+    else
+        print(paint("Shared vulnerability database unavailable; this run is memory-only.", COLOR_RED))
+    end if
+    legacy_app_folder = globals.local_computer.File("/root/autocred")
+    if is_file_type(typeof(legacy_app_folder)) then
+        if legacy_app_folder.is_folder then
+            print(paint("Legacy /root/autocred folder still shadows /bin/autocred from /root; archive or remove it after saving anything needed.", COLOR_ORANGE))
+        end if
+    end if
+end function
+
+
+terminal_diag_line = function(message, line)
+    lowered = message.lower
+    if lowered.indexOf("fail") != null or lowered.indexOf("error") != null or
+        lowered.indexOf("unavailable") != null or lowered.indexOf("exhausted") != null then
+        return paint(line, COLOR_RED)
+    end if
+    if lowered.indexOf("log ") != null or lowered.indexOf("cleanup") != null or
+        lowered.indexOf("finalizer") != null then return paint(line, COLOR_ORANGE)
+    if lowered.indexOf("vuln") != null or lowered.indexOf("overflow") != null or
+        lowered.indexOf("scan ") != null then return paint(line, COLOR_PURPLE)
+    if lowered.indexOf("success") != null or lowered.indexOf("credential") != null or
+        lowered.indexOf("complete") != null then return paint(line, COLOR_GREEN)
+    if lowered.indexOf("host") != null or lowered.indexOf("endpoint") != null or
+        lowered.indexOf("router") != null or lowered.indexOf("mail") != null then
+        return paint(line, COLOR_CYAN)
+    end if
+    return line
+end function
+
+
+open_debug_part = function()
+    if globals.debug_file_failed then return null
+    if not is_file_type(typeof(globals.log_folder)) then return null
+    globals.debug_part = globals.debug_part + 1
+    filename = DEBUG_FILE_PREFIX + ".txt"
+    if globals.debug_part > 1 then filename = DEBUG_FILE_PREFIX + "-part" + globals.debug_part + ".txt"
+    path = join_path(globals.log_folder.path, filename)
+    file = globals.local_computer.File(path)
+    if not is_file_type(typeof(file)) then
+        if globals.local_computer.touch(globals.log_folder.path, filename) != 1 then
+            globals.debug_file_failed = true
+            return null
+        end if
+        file = globals.local_computer.File(path)
+    end if
+    if not is_file_type(typeof(file)) then
+        globals.debug_file_failed = true
+        return null
+    end if
+    header = "AutoCred diagnostic log" + char(10) +
+        "version=" + SCRIPT_VERSION + char(10) +
+        "run=" + globals.debug_run_id + char(10) +
+        "part=" + globals.debug_part + char(10) +
+        "started=" + current_date + char(10) +
+        "execution_host=" + globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+    if file.set_content(header) != 1 then
+        globals.debug_file_failed = true
+        return null
+    end if
+    globals.debug_file = file
+    globals.debug_paths.push(path)
+    print("Diagnostic log: " + path)
+    return path
+end function
+
+
+init_debug_log = function()
+    if not is_file_type(typeof(globals.log_folder)) then return null
+    files = globals.log_folder.get_files
+    if typeof(files).lower == "list" then
+        for file in files
+            if file.name == DEBUG_FILE_PREFIX + ".txt" or
+                file.name.indexOf(DEBUG_FILE_PREFIX + "-part") == 0 then file.delete
+        end for
+    end if
+    globals.debug_run_id = floor(rnd * 1000000)
+    return open_debug_part
+end function
+
+
+flush_debug = function()
+    if globals.debug_file_failed then return
+    if not is_file_type(typeof(globals.debug_file)) then return
+    if globals.debug_pending.len == 0 then return
+    content = globals.debug_file.get_content
+    if typeof(content).lower != "string" then
+        globals.debug_file_failed = true
+        return
+    end if
+    block = globals.debug_pending.join(char(10))
+    if content.len + block.len + 1 > DEBUG_FILE_LIMIT then
+        if not open_debug_part then return
+        content = globals.debug_file.get_content
+        if typeof(content).lower != "string" then
+            globals.debug_file_failed = true
+            return
+        end if
+    end if
+    if globals.debug_file.set_content(content + char(10) + block) != 1 then
+        globals.debug_file_failed = true
+        return
+    end if
+    globals.debug_pending = []
+end function
+
+
+diag = function(message)
+    globals.log_seq = globals.log_seq + 1
+    line = "[ACCLOG " + globals.log_seq + "] " + message
+    print(terminal_diag_line(message, line))
+    if not globals.debug_file_failed then
+        if is_file_type(typeof(globals.debug_file)) then
+            globals.debug_pending.push(line)
+            if globals.debug_pending.len >= DEBUG_FLUSH_LINES then flush_debug
+        end if
+    end if
+end function
+
+
+diag_critical = function(message)
+    diag(message)
+    flush_debug
+end function
+
+
+has_rwx = function(file_object)
+    if not is_file_type(typeof(file_object)) then return false
+    if not file_object.has_permission("r") then return false
+    if not file_object.has_permission("w") then return false
+    return file_object.has_permission("x")
+end function
+
+
+access_level = function(value)
+    root = root_file(value)
+    if not root then return null
+
+    root_home = resolve_from_root(root, "/root")
+    if root_home then
+        if has_rwx(root_home) then return "root"
+    end if
+
+    home = resolve_from_root(root, "/home")
+    if not home then return "guest"
+
+    folders = home.get_folders
+    if typeof(folders) != "list" then return "guest"
+    for folder in folders
+        if folder.name == "guest" then continue
+        if has_rwx(folder) then return "user"
+    end for
+
+    return "guest"
+end function
+
+
+authority_user = function(value)
+    computer = computer_from_value(value)
+    if computer then
+        if access_level(computer) == "root" then return "root"
+        home = computer.File("/home")
+        if is_file_type(typeof(home)) then
+            folders = home.get_folders
+            if typeof(folders).lower == "list" then
+                for folder in folders
+                    if folder.name == "guest" then continue
+                    if has_rwx(folder) then return folder.name
+                end for
+            end if
+        end if
+        return "guest"
+    end if
+    level = access_level(value)
+    if level == "root" then return "root"
+    if level == "user" then return "user"
+    return "guest"
+end function
+
+
+is_router_computer = function(value)
+    computer = computer_from_value(value)
+    if not computer then return false
+    return is_file_type(typeof(computer.File("/lib/kernel_router.so")))
+end function
+
+
+is_exact_contract_host = function(value, contract)
+    computer = computer_from_value(value)
+    if not computer then return false
+    if computer.public_ip != contract.ip then return false
+    return computer.local_ip == contract.lan
+end function
+
+
+is_same_host = function(left, right)
+    left_computer = computer_from_value(left)
+    right_computer = computer_from_value(right)
+    if not left_computer then return false
+    if not right_computer then return false
+    if left_computer.public_ip != right_computer.public_ip then return false
+    return left_computer.local_ip == right_computer.local_ip
+end function
+
+
+passwd_has_account = function(value, username)
+    if typeof(username).lower != "string" then return false
+    if username == "" then return false
+    passwd = passwd_file_from(value)
+    if not is_file_type(typeof(passwd)) then return false
+    if not passwd.has_permission("r") then return false
+    content = passwd.get_content
+    if typeof(content).lower != "string" then return false
+    for line in content.split(char(10))
+        fields = line.trim.split(":")
+        if fields.len < 2 then continue
+        if fields[0] == username then return true
+    end for
+    return false
+end function
+
+
+candidate_exact = function(candidate, contract)
+    if is_exact_contract_host(candidate.value, contract) then return true
+    if candidate.exact_hint then
+        if is_file_type(typeof(candidate.value)) then return true
+    end if
+    return false
+end function
+
+
+sort_candidates = function(candidates, contract)
+    exact_requested = []
+    exact_root = []
+    exact_user = []
+    exact_guest = []
+    hinted = []
+    other_user = []
+    other = []
+    for candidate in candidates
+        value = candidate.value
+        if not is_exploit_object(value) then continue
+        exact = candidate_exact(candidate, contract)
+        authority = authority_user(value)
+        requested = false
+        if typeof(contract.user).lower == "string" then
+            requested = passwd_has_account(value, contract.user)
+        end if
+        if exact and requested then
+            exact_requested.push(candidate)
+        else if exact and authority == "root" then
+            exact_root.push(candidate)
+        else if exact and authority != "guest" then
+            exact_user.push(candidate)
+        else if exact then
+            exact_guest.push(candidate)
+        else if candidate.exact_hint then
+            hinted.push(candidate)
+        else if authority != "guest" then
+            other_user.push(candidate)
+        else
+            other.push(candidate)
+        end if
+    end for
+    return exact_requested + exact_root + exact_user + exact_guest + hinted + other_user + other
+end function
+
+
+folder_child = function(folder, name)
+    if not is_file_type(typeof(folder)) then return null
+    children = folder.get_folders
+    if typeof(children).lower != "list" then return null
+    for child in children
+        if child.name == name then return child
+    end for
+    return null
+end function
+
+
+file_child = function(folder, name)
+    if not is_file_type(typeof(folder)) then return null
+    children = folder.get_files
+    if typeof(children).lower != "list" then return null
+    for child in children
+        if child.name == name then return child
+    end for
+    return null
+end function
+
+
+scrub_source_from_root = function(root)
+    var_folder = folder_child(root, "var")
+    if is_file_type(typeof(var_folder)) then
+        source = file_child(var_folder, "silentclean")
+        if is_file_type(typeof(source)) then
+            if source.has_permission("r") then return source
+        end if
+    end if
+    etc_folder = folder_child(root, "etc")
+    if is_file_type(typeof(etc_folder)) then
+        for name in ["fstab", "xorg.conf"]
+            source = file_child(etc_folder, name)
+            if is_file_type(typeof(source)) then
+                if source.has_permission("r") then return source
+            end if
+        end for
+        files = etc_folder.get_files
+        if typeof(files).lower == "list" then
+            for source in files
+                if source.is_binary then continue
+                if source.has_permission("r") then return source
+            end for
+        end if
+    end if
+    return null
+end function
+
+
+log_host_key = function(value)
+    computer = computer_from_value(value)
+    if not computer then return ""
+    return computer.public_ip + "/" + computer.local_ip
+end function
+
+
+stage_log_finalizer = function(value, role = "route")
+    root = root_file(value)
+    if not is_file_type(typeof(root)) then return false
+    computer = computer_from_value(value)
+    key = log_host_key(value)
+    if key == "" then key = "file-object-" + globals.contract_log_finalizers.len
+    local_key = globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+    if key == local_key then return false
+    if globals.contract_log_finalizer_keys.hasIndex(key) then return true
+
+    var_folder = folder_child(root, "var")
+    log_file = file_child(var_folder, "system.log")
+    if not is_file_type(typeof(log_file)) then
+        diag("log finalizer unavailable | host=" + key + " | reason=path")
+        return false
+    end if
+    if not log_file.has_permission("w") then
+        diag("log finalizer unavailable | host=" + key + " | reason=permission")
+        return false
+    end if
+    source = scrub_source_from_root(root)
+    if not is_file_type(typeof(source)) then
+        diag("log finalizer unavailable | host=" + key + " | reason=no_scrub_source")
+        return false
+    end if
+    globals.contract_log_finalizers.push({"key": key, "role": role, "source": source})
+    globals.contract_log_finalizer_keys[key] = 1
+    diag("log finalizer staged | host=" + key + " | role=" + role)
+    return true
+end function
+
+
+finalize_contract_logs = function(contract)
+    entries = globals.contract_log_finalizers
+    if entries.len == 0 then
+        diag_critical("log finalizer complete | contract=" + contract.index + " | staged=0")
+        globals.contract_log_finalizers = []
+        globals.contract_log_finalizer_keys = {}
+        return {"staged": 0, "completed": 0, "failed": 0}
+    end if
+    wait(LOG_FINALIZER_WAIT)
+    completed = 0
+    failed = 0
+    index = entries.len - 1
+    while index >= 0
+        entry = entries[index]
+        result = 0
+        if is_file_type(typeof(entry.source)) then result = entry.source.copy("/var", "system.log")
+        entry["source"] = null
+        if result == 1 then
+            completed = completed + 1
+            diag("log finalizer copied | host=" + entry.key + " | role=" + entry.role)
+        else
+            failed = failed + 1
+            diag("log finalizer failed | host=" + entry.key + " | role=" + entry.role + " | result=" + result)
+        end if
+        index = index - 1
+    end while
+    diag_critical("log finalizer summary | contract=" + contract.index +
+        " | completed=" + completed + "/" + entries.len + " | failed=" + failed)
+    staged = entries.len
+    globals.contract_log_finalizers = []
+    globals.contract_log_finalizer_keys = {}
+    return {"staged": staged, "completed": completed, "failed": failed}
+end function
+
+
+decipher_password_hash = function(password_hash)
+    // Preserve the legacy known-password shortcut used by this script.
+    if password_hash == "ced421b174bd05a560a4f098565d4c7b" then
+        return "madeinRussia"
+    end if
+
+    password = globals.crypto.decipher(password_hash)
+    if typeof(password) != "string" then return null
+    if password == "" then return null
+    return password
+end function
+
+
+credential_from_value = function(requested_user, value)
+    passwd = passwd_file_from(value)
+    if not is_file_type(typeof(passwd)) then return null
+    if not passwd.has_permission("r") then return null
+    content = passwd.get_content
+    if typeof(content).lower != "string" then return null
+
+    for line in content.split(char(10))
+        fields = line.trim.split(":")
+        if fields.len < 2 then continue
+        account = fields[0].trim
+        if account == "" then continue
+        if typeof(requested_user).lower == "string" then
+            if account != requested_user then continue
+        end if
+        password = decipher_password_hash(fields[1].trim)
+        if typeof(password).lower != "string" then continue
+        return {"user": account, "password": password}
+    end for
+    return null
+end function
+
+
+capture_root_password = function(value, contract = null)
+    computer = computer_from_value(value)
+    host_key = ""
+    network_key = ""
+    if computer then
+        host_key = computer.public_ip + "/" + computer.local_ip
+        network_key = computer.public_ip
+    else if contract then
+        host_key = "network/" + contract.ip
+        network_key = contract.ip
+    else
+        return null
+    end if
+    if globals.root_passwords.hasIndex(host_key) then return globals.root_passwords[host_key]
+    if globals.root_password_attempted.hasIndex(host_key) then return null
+
+    passwd = passwd_file_from(value)
+    if not is_file_type(typeof(passwd)) then return null
+    if not passwd.has_permission("r") then return null
+    content = passwd.get_content
+    if typeof(content).lower != "string" then return null
+    root_hash = ""
+    for line in content.split(char(10))
+        fields = line.trim.split(":")
+        if fields.len < 2 then continue
+        if fields[0] == "root" then
+            root_hash = fields[1].trim
+            break
+        end if
+    end for
+    if root_hash == "" then return null
+    globals.root_password_attempted[host_key] = 1
+    password = decipher_password_hash(root_hash)
+    if typeof(password).lower != "string" then
+        diag("root credential | host=" + host_key + " | decipher=failed")
+        return null
+    end if
+    globals.root_passwords[host_key] = password
+    globals.network_root_passwords[network_key] = password
+    diag("root credential | host=" + host_key + " | decipher=success")
+    return password
+end function
+
+
+// The official Nightly v0.9.6974 change adds list-ID support. Public v0.9.6773
+// documents a scalar ID. The Nightly changelog does not document the batch
+// return shape, so normalize the plausible string/list/map forms.
+mail_text_from_value = function(value, mail_id, depth = 0)
+    if depth > 8 then return null
+
+    kind = typeof(value)
+    if kind == "string" then return value
+
+    if kind == "list" then
+        if value.len == 0 then return null
+        best_text = null
+        for item in value
+            text = mail_text_from_value(item, mail_id, depth + 1)
+            if typeof(text) != "string" then continue
+            if not best_text then
+                best_text = text
+            else if text.len > best_text.len then
+                best_text = text
+            end if
+        end for
+        return best_text
+    end if
+
+    if kind == "map" then
+        if value.hasIndex(mail_id) then return mail_text_from_value(value[mail_id], mail_id, depth + 1)
+        if value.hasIndex("content") then return mail_text_from_value(value["content"], mail_id, depth + 1)
+        if value.hasIndex("body") then return mail_text_from_value(value["body"], mail_id, depth + 1)
+        if value.hasIndex("message") then return mail_text_from_value(value["message"], mail_id, depth + 1)
+        if value.hasIndex("text") then return mail_text_from_value(value["text"], mail_id, depth + 1)
+
+        values = value.values
+        best_text = null
+        for item in values
+            text = mail_text_from_value(item, mail_id, depth + 1)
+            if typeof(text) != "string" then continue
+            if not best_text then
+                best_text = text
+            else if text.len > best_text.len then
+                best_text = text
+            end if
+        end for
+        return best_text
+    end if
+
+    return null
+end function
+
+
+is_mail_read_error = function(value)
+    if typeof(value) != "string" then return true
+    cleaned = value.trim
+    if cleaned == "" then return true
+
+    lowered = cleaned.lower
+    if lowered == "mail not found" then return true
+    if lowered.indexOf("no internet access") != null then return true
+    if lowered.indexOf("unknown error:") == 0 then return true
+    return false
+end function
+
+
+mail_value_completed = function(value, depth = 0)
+    if depth > 8 then return false
+    kind = typeof(value).lower
+    if kind == "string" then
+        lowered = strip_mail_markup(value).lower
+        if lowered.indexOf("customer is satisfied") != null then return true
+        if lowered.indexOf("income in your account") != null then return true
+        return false
+    end if
+    if kind == "list" then
+        for item in value
+            if mail_value_completed(item, depth + 1) then return true
+        end for
+        return false
+    end if
+    if kind == "map" then
+        for item in value.values
+            if mail_value_completed(item, depth + 1) then return true
+        end for
+    end if
+    return false
+end function
+
+
+read_mail_compatible = function(mail_id)
+    // Public uses a scalar ID. Nightly added list-ID support without publishing
+    // the batch output shape, so use the scalar form first and batch as fallback.
+    scalar_result = globals.meta_mail.read(mail_id)
+    scalar_text = mail_text_from_value(scalar_result, mail_id)
+    if not is_mail_read_error(scalar_text) then
+        if mail_value_completed(scalar_result) then return "Customer is satisfied. " + scalar_text
+        return scalar_text
+    end if
+
+    batch_result = globals.meta_mail.read([mail_id])
+    batch_text = mail_text_from_value(batch_result, mail_id)
+    if not is_mail_read_error(batch_text) then
+        if mail_value_completed(batch_result) then return "Customer is satisfied. " + batch_text
+        return batch_text
+    end if
+
+    return null
+end function
+
+
+field_from_header = function(header, labels)
+    if typeof(header) != "string" then return null
+
+    for raw_line in header.split(char(10))
+        line = raw_line.trim
+        for label in labels
+            prefix = label + ":"
+            if line.indexOf(prefix) == 0 then
+                value = line[prefix.len:]
+                return value.trim
+            end if
+        end for
+    end for
+
+    return null
+end function
+
+
+parse_mail_header = function(header)
+    if typeof(header) != "string" then return null
+
+    mail_id = field_from_header(header, ["ID", "MailID", "Mail ID"])
+    subject = field_from_header(header, ["Subject"])
+
+    // Older fetch output used stable line positions. Keep a guarded fallback
+    // without relying on those positions first.
+    lines = header.split(char(10))
+    if not mail_id then
+        if lines.len > 2 then
+            pieces = lines[2].split(":")
+            if pieces.len > 1 then mail_id = pieces[1].trim
+        end if
+    end if
+    if not subject then
+        if lines.len > 4 then
+            pieces = lines[4].split(":")
+            if pieces.len > 1 then subject = pieces[1].trim
+        end if
+    end if
+
+    if not mail_id then return null
+    if not subject then return null
+    return {"id": mail_id, "subject": subject}
+end function
+
+
+collect_mail_records = function()
+    records = []
+    summaries = globals.meta_mail.fetch
+    if typeof(summaries).lower != "list" then return null
+
+    for summary in summaries
+        header = parse_mail_header(summary)
+        body = null
+        if header then body = read_mail_compatible(header.id)
+        records.push({"summary": summary, "header": header, "body": body})
+    end for
+    diag_critical("mail snapshot | account=" + globals.mail_user + " | records=" + records.len)
+    return records
+end function
+
+
+mail_intake_path = function(prefix, token)
+    return TASK_ROOT + "/" + prefix + token + ".txt"
+end function
+
+
+mail_intake_file = function(prefix, token, create = false)
+    path = mail_intake_path(prefix, token)
+    file = globals.local_computer.File(path)
+    if is_file_type(typeof(file)) then return file
+    if not create then return null
+    if not is_file_type(typeof(globals.task_folder)) then return null
+    name = prefix + token + ".txt"
+    if globals.local_computer.touch(globals.task_folder.path, name) != 1 then return null
+    file = globals.local_computer.File(path)
+    if is_file_type(typeof(file)) then return file
+    return null
+end function
+
+
+mail_intake_encode = function(value)
+    if typeof(value) != "string" then value = ""
+    return "x" + value.replace(char(30), " ").replace(char(31), " ").replace(char(13), "")
+end function
+
+
+mail_intake_decode = function(value)
+    if typeof(value) != "string" then return ""
+    if value.len == 0 then return ""
+    if value[0] == "x" then return value[1:]
+    return value
+end function
+
+
+write_mail_intake_snapshot = function(token, status, detail, records)
+    segments = [MAIL_INTAKE_SNAPSHOT_HEADER]
+    segments.push("S" + char(31) + mail_intake_encode(status) + char(31) + mail_intake_encode(detail))
+    if typeof(records).lower == "list" then
+        for record in records
+            header = record.header
+            mail_id = ""
+            subject = ""
+            if typeof(header).lower == "map" then
+                if header.hasIndex("id") then mail_id = header.id
+                if header.hasIndex("subject") then subject = header.subject
+            end if
+            body_state = "0"
+            body = ""
+            if typeof(record.body) == "string" then
+                body_state = "1"
+                body = record.body
+            end if
+            segments.push("R" + char(31) +
+                mail_intake_encode(record.summary) + char(31) +
+                mail_intake_encode(mail_id) + char(31) +
+                mail_intake_encode(subject) + char(31) +
+                body_state + char(31) + mail_intake_encode(body))
+        end for
+    end if
+
+    snapshot = mail_intake_file(MAIL_INTAKE_SNAPSHOT_PREFIX, token, true)
+    if not is_file_type(typeof(snapshot)) then return false
+    return snapshot.set_content(segments.join(char(30))) == 1
+end function
+
+
+read_mail_intake_snapshot = function(content)
+    if typeof(content) != "string" then return null
+    segments = content.split(char(30))
+    if segments.len < 2 then return null
+    if segments[0] != MAIL_INTAKE_SNAPSHOT_HEADER then return null
+
+    status_fields = segments[1].split(char(31))
+    if status_fields.len < 3 then return null
+    if status_fields[0] != "S" then return null
+    status = mail_intake_decode(status_fields[1])
+    detail = mail_intake_decode(status_fields[2])
+    if status != "ok" then
+        diag_critical("mail intake worker failed | status=" + status + " | detail=" + detail)
+        return null
+    end if
+
+    records = []
+    if segments.len > 2 then
+        for segment_index in range(2, segments.len - 1)
+            fields = segments[segment_index].split(char(31))
+            if fields.len < 6 then continue
+            if fields[0] != "R" then continue
+            summary = mail_intake_decode(fields[1])
+            mail_id = mail_intake_decode(fields[2])
+            subject = mail_intake_decode(fields[3])
+            header = null
+            if mail_id != "" and subject != "" then
+                header = {"id": mail_id, "subject": subject}
+            end if
+            body = null
+            if fields[4] == "1" then body = mail_intake_decode(fields[5])
+            records.push({"summary": summary, "header": header, "body": body})
+        end for
+    end if
+    diag_critical("mail intake fresh process | records=" + records.len)
+    return records
+end function
+
+
+mail_intake_child_requested = function()
+    if params.len < 2 then return false
+    return params[0] == "--mail-intake"
+end function
+
+
+run_mail_intake_child = function()
+    token = params[1].trim
+    if token == "" then exit("Mail intake token missing.")
+    request = mail_intake_file(MAIL_INTAKE_REQUEST_PREFIX, token)
+    if not is_file_type(typeof(request)) then
+        write_mail_intake_snapshot(token, "request_missing", "credential handoff file unavailable", [])
+        exit
+    end if
+
+    request_content = request.get_content
+    request.set_content("")
+    request.delete
+    if typeof(request_content) != "string" then
+        write_mail_intake_snapshot(token, "request_unreadable", "credential handoff file unreadable", [])
+        exit
+    end if
+    request_lines = request_content.replace(char(13), "").split(char(10))
+    if request_lines.len < 2 then
+        write_mail_intake_snapshot(token, "request_malformed", "credential handoff fields missing", [])
+        exit
+    end if
+
+    globals.mail_user = request_lines[0].trim
+    globals.mail_password = request_lines[1].trim
+    request_content = ""
+    if globals.mail_user == "" or globals.mail_password == "" then
+        write_mail_intake_snapshot(token, "request_malformed", "mail user or password missing", [])
+        exit
+    end if
+
+    globals.meta_mail = mail_login(globals.mail_user, globals.mail_password)
+    globals.mail_password = ""
+    if typeof(globals.meta_mail).lower != "metamail" then
+        write_mail_intake_snapshot(token, "login_failed", "MetaMail login rejected", [])
+        exit
+    end if
+
+    summaries = globals.meta_mail.fetch
+    if typeof(summaries).lower != "list" then
+        write_mail_intake_snapshot(token, "fetch_failed", "MetaMail.fetch returned " + typeof(summaries), [])
+        exit
+    end if
+
+    records = []
+    for summary in summaries
+        header = parse_mail_header(summary)
+        body = null
+        if header then body = read_mail_compatible(header.id)
+        records.push({"summary": summary, "header": header, "body": body})
+    end for
+    write_mail_intake_snapshot(token, "ok", "records=" + records.len, records)
+    exit
+end function
+
+
+collect_mail_records_direct = function()
+    globals.meta_mail = mail_login(globals.mail_user, globals.mail_password)
+    if typeof(globals.meta_mail).lower != "metamail" then return null
+    return collect_mail_records
+end function
+
+
+collect_fresh_mail_records = function()
+    if not is_file_type(typeof(globals.task_folder)) then
+        diag_critical("mail intake worker unavailable | reason=task_folder")
+        return collect_mail_records_direct
+    end if
+
+    token = str(floor(rnd * 1000000000))
+    request = mail_intake_file(MAIL_INTAKE_REQUEST_PREFIX, token, true)
+    if not is_file_type(typeof(request)) then
+        diag_critical("mail intake worker unavailable | reason=request_create")
+        return collect_mail_records_direct
+    end if
+    if request.set_content(globals.mail_user + char(10) + globals.mail_password) != 1 then
+        request.delete
+        diag_critical("mail intake worker unavailable | reason=request_write")
+        return collect_mail_records_direct
+    end if
+
+    launch_result = globals.local_shell.launch(program_path, "--mail-intake " + token)
+    diag_critical("mail intake worker launch | token=" + token + " | result=" + launch_result)
+    if launch_result != 1 then
+        request = mail_intake_file(MAIL_INTAKE_REQUEST_PREFIX, token)
+        if is_file_type(typeof(request)) then
+            request.set_content("")
+            request.delete
+        end if
+        diag_critical("mail intake worker fallback | token=" + token + " | reason=launch_failed")
+        return collect_mail_records_direct
+    end if
+
+    snapshot_content = null
+    waited = 0
+    while waited < MAIL_INTAKE_WAIT
+        wait(1)
+        waited = waited + 1
+        snapshot = mail_intake_file(MAIL_INTAKE_SNAPSHOT_PREFIX, token)
+        if not is_file_type(typeof(snapshot)) then continue
+        snapshot_content = snapshot.get_content
+        if typeof(snapshot_content) == "string" then
+            if snapshot_content.indexOf(MAIL_INTAKE_SNAPSHOT_HEADER) == 0 then break
+        end if
+    end while
+
+    request = mail_intake_file(MAIL_INTAKE_REQUEST_PREFIX, token)
+    if is_file_type(typeof(request)) then
+        request.set_content("")
+        request.delete
+    end if
+    snapshot = mail_intake_file(MAIL_INTAKE_SNAPSHOT_PREFIX, token)
+    if is_file_type(typeof(snapshot)) then snapshot.delete
+
+    records = read_mail_intake_snapshot(snapshot_content)
+    if typeof(records).lower == "list" then
+        diag_critical("mail intake worker complete | token=" + token + " | waited=" + waited + " | records=" + records.len)
+        return records
+    end if
+
+    diag_critical("mail intake worker fallback | token=" + token + " | waited=" + waited)
+    return collect_mail_records_direct
+end function
+
+
+between = function(text, left_marker, right_marker)
+    if typeof(text) != "string" then return null
+
+    start = text.indexOf(left_marker)
+    if start == null then return null
+    start = start + left_marker.len
+
+    relative_end = text[start:].indexOf(right_marker)
+    if relative_end == null then return null
+    return text[start:start + relative_end]
+end function
+
+
+ipv4_octets = function(text)
+    if typeof(text) != "string" then return null
+
+    // split uses a regular expression; a dot inside a character class is
+    // literal and avoids treating every character as a separator.
+    parts = text.split("[.]")
+    if parts.len != 4 then return null
+
+    octets = []
+    for part in parts
+        if part == "" then return null
+        number = part.to_int
+        if typeof(number) != "number" then return null
+        if number < 0 then return null
+        if number > 255 then return null
+        if str(number) != part then return null
+        octets.push(number)
+    end for
+
+    return octets
+end function
+
+
+is_private_ipv4 = function(text)
+    octets = ipv4_octets(text)
+    if not octets then return false
+
+    if octets[0] == 10 then return true
+    if octets[0] == 172 then
+        if octets[1] >= 16 then
+            if octets[1] <= 31 then return true
+        end if
+    end if
+    if octets[0] == 192 then
+        if octets[1] == 168 then return true
+    end if
+
+    return false
+end function
+
+
+strip_mail_markup = function(text)
+    if typeof(text) != "string" then return ""
+
+    plain = text
+    while true
+        left = plain.indexOf("<")
+        if left == null then break
+        right = plain.indexOf(">", left)
+        if right == null then break
+        plain = plain[:left] + plain[right + 1:]
+    end while
+
+    return plain.replace(char(13), "")
+end function
+
+
+trim_address_token = function(value)
+    while value.len > 0
+        if value[0] != "." then break
+        value = value[1:]
+    end while
+
+    while value.len > 0
+        if value[-1] != "." then break
+        value = value[:-1]
+    end while
+
+    return value
+end function
+
+
+contract_addresses = function(text)
+    public_ip = null
+    local_ip = null
+    candidates = text.split("[^0-9.]+")
+    if typeof(candidates) != "list" then return [public_ip, local_ip]
+
+    for raw_value in candidates
+        value = trim_address_token(raw_value)
+        if not ipv4_octets(value) then continue
+
+        if is_private_ipv4(value) then
+            if not local_ip then local_ip = value
+        else
+            if not public_ip then public_ip = value
+        end if
+    end for
+
+    return [public_ip, local_ip]
+end function
+
+
+contract_user = function(text)
+    lowered = text.lower
+    if lowered.indexOf("credentials of any user") != null then return false
+
+    markers = [
+        "login credentials of the user ",
+        "credentials of the user ",
+        "credentials of user ",
+        "the user is "]
+
+    for marker in markers
+        start = lowered.indexOf(marker)
+        if start == null then continue
+
+        remainder = text[start + marker.len:]
+        pieces = remainder.split("[^A-Za-z0-9_-]+")
+        if typeof(pieces) != "list" then return null
+        for piece in pieces
+            if piece != "" then return piece
+        end for
+    end for
+
+    return null
+end function
+
+
+parse_contract = function(body, mail_id, display_index)
+    if typeof(body) != "string" then return null
+
+    plain = strip_mail_markup(body)
+    addresses = contract_addresses(plain)
+    ip = addresses[0]
+    lan = addresses[1]
+    if not ip then return null
+    if not lan then return null
+    if not ipv4_octets(ip) then return null
+    if not is_private_ipv4(lan) then return null
+
+    requested_user = contract_user(plain)
+    if requested_user == null then return null
+    if typeof(requested_user) == "string" then
+        if requested_user.len > 30 then return null
+    end if
+
+    return {
+        "index": display_index,
+        "mail_id": mail_id,
+        "ip": ip,
+        "lan": lan,
+        "user": requested_user}
+end function
+
+
+unsafe_values = function(scan_text)
+    values = []
+    if typeof(scan_text) != "string" then return values
+
+    segments = scan_text.split("Unsafe check: ")
+    if segments.len < 2 then return values
+
+    for segment in segments[1:]
+        label_start = segment.indexOf("<b>")
+        label_end = segment.indexOf("</b>")
+        if label_start == null then continue
+        if label_end == null then continue
+        if label_end <= label_start + 3 then continue
+
+        value = segment[label_start + 3:label_end]
+        value = value.replace(char(10), "").trim
+        if value != "" then values.push(value)
+    end for
+
+    return values
+end function
+
+
+db_field = function(value)
+    return str(value).replace("[|]", "/").replace(char(13), " ").replace(char(10), " ")
+end function
+
+
+vuln_fingerprint = function(meta_lib)
+    return meta_lib.lib_name + "@" + meta_lib.version
+end function
+
+
+vuln_requirement_mode = function(requirement)
+    lowered = requirement.lower
+    if lowered.indexOf("password") != null then return "password"
+    if lowered.indexOf("lan ip") != null then return "lan"
+    if lowered.indexOf("local ip") != null then return "lan"
+    if lowered.indexOf("same subnet") != null then return "lan"
+    if lowered.indexOf("same network") != null then return "lan"
+    if lowered.indexOf("router membership") != null then return "lan"
+    if lowered.trim == "" then return "plain"
+    return "unknown"
+end function
+
+
+db_path_component = function(value)
+    cleaned = str(value).trim
+    cleaned = cleaned.replace("[/]", "_")
+    cleaned = cleaned.replace("[:]", "_")
+    cleaned = cleaned.replace("[|]", "_")
+    cleaned = cleaned.replace(" ", "_")
+    cleaned = cleaned.replace("@", "_")
+    if cleaned == "" then cleaned = "unknown"
+    return cleaned
+end function
+
+
+vuln_shard_name = function(number)
+    digits = str(number)
+    while digits.len < 4
+        digits = "0" + digits
+    end while
+    return VULN_DB_SHARD_PREFIX + digits + ".txt"
+end function
+
+
+vuln_major_version = function(version)
+    parts = str(version).split("[.]")
+    if parts.len == 0 then return "unknown"
+    return db_path_component(parts[0])
+end function
+
+
+vuln_bucket_key_values = function(library, version)
+    return str(library) + "@V" + vuln_major_version(version)
+end function
+
+
+vuln_bucket_key = function(meta_lib)
+    return vuln_bucket_key_values(meta_lib.lib_name, meta_lib.version)
+end function
+
+
+vuln_db_file = function(filename, create = false)
+    folder = globals.vuln_db_folder
+    if not is_file_type(typeof(folder)) then return null
+    path = join_path(folder.path, filename)
+    file = globals.local_computer.File(path)
+    if is_file_type(typeof(file)) then return file
+    if not create then return null
+    if globals.local_computer.touch(folder.path, filename) != 1 then return null
+    return globals.local_computer.File(path)
+end function
+
+
+vuln_folder_named = function(name, create = false)
+    folder = globals.vuln_db_folder
+    if not is_file_type(typeof(folder)) then return null
+    path = join_path(folder.path, name)
+    result = globals.local_computer.File(path)
+    if is_file_type(typeof(result)) then
+        if result.is_folder then return result
+        return null
+    end if
+    if not create then return null
+    return ensure_local_folder(folder.path, name)
+end function
+
+
+vuln_library_folder = function(library, create = false)
+    return vuln_folder_named(db_path_component(library), create)
+end function
+
+
+vuln_bucket_folder = function(library, major, create = false)
+    library_folder = vuln_library_folder(library, create)
+    if not is_file_type(typeof(library_folder)) then return null
+    name = "V" + db_path_component(major)
+    path = join_path(library_folder.path, name)
+    folder = globals.local_computer.File(path)
+    if is_file_type(typeof(folder)) then
+        if folder.is_folder then return folder
+        return null
+    end if
+    if not create then return null
+    return ensure_local_folder(library_folder.path, name)
+end function
+
+
+vuln_library_file = function(folder, filename, create = false)
+    if not is_file_type(typeof(folder)) then return null
+    path = join_path(folder.path, filename)
+    file = globals.local_computer.File(path)
+    if is_file_type(typeof(file)) then return file
+    if not create then return null
+    if globals.local_computer.touch(folder.path, filename) != 1 then return null
+    return globals.local_computer.File(path)
+end function
+
+
+legacy_vuln_shard_files = function()
+    names = []
+    index_file = globals.local_computer.File(VULN_DB_INDEX_PATH)
+    if is_file_type(typeof(index_file)) then
+        content = index_file.get_content
+        if typeof(content).lower == "string" then
+            lines = content.replace(char(13), "").split(char(10))
+            if lines.len > 0 then
+                if lines[0].trim == VULN_DB_LEGACY_INDEX_HEADER then
+                    for line in lines[1:]
+                        parts = line.trim.split("[|]")
+                        if parts.len < 2 then continue
+                        if parts[0] != "F" then continue
+                        if parts[1].indexOf(VULN_DB_LEGACY_SHARD_PREFIX) != 0 then continue
+                        add_unique_string(names, parts[1])
+                    end for
+                end if
+            end if
+        end if
+    end if
+    if names.len > 0 then return names
+    if not is_file_type(typeof(globals.vuln_db_folder)) then return names
+    files = globals.vuln_db_folder.get_files
+    if typeof(files).lower != "list" then return names
+    for file in files
+        if file.name.indexOf(VULN_DB_LEGACY_SHARD_PREFIX) == 0 then add_unique_string(names, file.name)
+    end for
+    return names
+end function
+
+
+load_vuln_index = function()
+    index_file = globals.local_computer.File(VULN_DB_INDEX_PATH)
+    if not is_file_type(typeof(index_file)) then return "missing"
+    content = index_file.get_content
+    if typeof(content).lower != "string" then return "unreadable"
+    lines = content.replace(char(13), "").split(char(10))
+    if lines.len == 0 then return "empty"
+    header = lines[0].trim
+    if header != VULN_DB_INDEX_HEADER then return header
+    for line in lines[1:]
+        parts = line.trim.split("[|]")
+        if parts.len < 7 then continue
+        if parts[0] != "B" then continue
+        count = parts[5].to_int
+        if typeof(count).lower != "number" then count = 0
+        if count < 0 then count = 0
+        bucket_key = parts[1] + "@V" + parts[2]
+        globals.vuln_bucket_meta[bucket_key] = [parts[1], parts[2]]
+        globals.vuln_index[bucket_key] = {
+            "lib": parts[1], "major": parts[2],
+            "folder": parts[3], "bucket": parts[4],
+            "count": count, "source": parts[6]}
+    end for
+    return header
+end function
+
+
+merge_vuln_entry = function(fingerprint, incoming)
+    if not globals.vuln_db.hasIndex(fingerprint) then globals.vuln_db[fingerprint] = []
+    for known in globals.vuln_db[fingerprint]
+        if known.region != incoming.region then continue
+        if known.unsafe != incoming.unsafe then continue
+        if known.mode != incoming.mode then continue
+        if incoming.score > known.score then
+            known.score = incoming.score
+            known.last_kind = incoming.last_kind
+        end if
+        if incoming.hits > known.hits then known.hits = incoming.hits
+        if incoming.attempts > known.attempts then known.attempts = incoming.attempts
+        if known.requirement == "" and incoming.requirement != "" then known.requirement = incoming.requirement
+        if known.source == "-" and incoming.source != "-" then known.source = incoming.source
+        return false
+    end for
+    globals.vuln_db[fingerprint].push(incoming)
+    return true
+end function
+
+
+remember_vuln_fingerprint = function(library, version)
+    fingerprint = library + "@" + version
+    bucket_key = vuln_bucket_key_values(library, version)
+    globals.vuln_meta[fingerprint] = [library, version]
+    globals.vuln_loaded[fingerprint] = 1
+    globals.vuln_bucket_meta[bucket_key] = [library, vuln_major_version(version)]
+    if not globals.vuln_db.hasIndex(fingerprint) then globals.vuln_db[fingerprint] = []
+    return fingerprint
+end function
+
+
+load_vuln_content = function(content, expected_fingerprint = "")
+    if typeof(content).lower != "string" then return 0
+    loaded = 0
+    for line in content.split(char(10))
+        parts = line.replace(char(13), "").trim.split("[|]")
+        if parts.len < 3 then continue
+        if parts[0] == "S" then
+            fingerprint = parts[1] + "@" + parts[2]
+            if expected_fingerprint != "" and fingerprint != expected_fingerprint then continue
+            globals.vuln_scanned[fingerprint] = 1
+            remember_vuln_fingerprint(parts[1], parts[2])
+            continue
+        end if
+        if parts[0] != "V" then continue
+        if parts.len < 11 then continue
+        fingerprint = parts[1] + "@" + parts[2]
+        if expected_fingerprint != "" and fingerprint != expected_fingerprint then continue
+        score = parts[7].to_int
+        hits = parts[8].to_int
+        attempts = parts[9].to_int
+        if typeof(score).lower != "number" then score = 0
+        if typeof(hits).lower != "number" then hits = 0
+        if typeof(attempts).lower != "number" then attempts = 0
+        source = "-"
+        if parts.len >= 12 then source = parts[11]
+        entry = {
+            "lib": parts[1], "version": parts[2], "region": parts[3],
+            "unsafe": parts[4], "mode": parts[5], "requirement": parts[6],
+            "score": score, "hits": hits, "attempts": attempts,
+            "last_kind": parts[10], "source": source}
+        remember_vuln_fingerprint(parts[1], parts[2])
+        globals.vuln_scanned[fingerprint] = 1
+        if merge_vuln_entry(fingerprint, entry) then loaded = loaded + 1
+    end for
+    return loaded
+end function
+
+
+load_vuln_bucket = function(meta_lib)
+    bucket_key = vuln_bucket_key(meta_lib)
+    if globals.vuln_loaded_buckets.hasIndex(bucket_key) then return 0
+    globals.vuln_loaded_buckets[bucket_key] = 1
+
+    library = meta_lib.lib_name
+    major = vuln_major_version(meta_lib.version)
+    folder_name = db_path_component(library)
+    bucket_name = "V" + major
+    count = 0
+    if globals.vuln_index.hasIndex(bucket_key) then
+        indexed = globals.vuln_index[bucket_key]
+        folder_name = indexed.folder
+        bucket_name = indexed.bucket
+        count = indexed.count
+    end if
+    globals.vuln_bucket_meta[bucket_key] = [library, major]
+
+    library_folder = vuln_folder_named(folder_name)
+    if not is_file_type(typeof(library_folder)) then
+        diag("vuln bucket load | bucket=" + bucket_key + " | shards=0 | entries=0")
+        return 0
+    end if
+    bucket_folder = globals.local_computer.File(join_path(library_folder.path, bucket_name))
+    if not is_file_type(typeof(bucket_folder)) then
+        diag("vuln bucket load | bucket=" + bucket_key + " | shards=0 | entries=0")
+        return 0
+    end if
+    if not bucket_folder.is_folder then
+        diag("vuln bucket load | bucket=" + bucket_key + " | shards=0 | entries=0")
+        return 0
+    end if
+
+    names = []
+    if count > 0 then
+        number = 1
+        while number <= count
+            names.push(vuln_shard_name(number))
+            number = number + 1
+        end while
+    else
+        files = bucket_folder.get_files
+        if typeof(files).lower == "list" then
+            for file in files
+                if file.name.indexOf(VULN_DB_SHARD_PREFIX) == 0 then add_unique_string(names, file.name)
+            end for
+        end if
+    end if
+
+    loaded = 0
+    for name in names
+        file = vuln_library_file(bucket_folder, name)
+        if is_file_type(typeof(file)) then loaded = loaded + load_vuln_content(file.get_content)
+    end for
+    diag("vuln bucket load | bucket=" + bucket_key + " | shards=" + names.len + " | entries=" + loaded)
+    return loaded
+end function
+
+
+mark_vuln_dirty = function(fingerprint)
+    globals.vuln_dirty = true
+    globals.vuln_dirty_fingerprints[fingerprint] = 1
+    if globals.vuln_meta.hasIndex(fingerprint) then
+        meta = globals.vuln_meta[fingerprint]
+        major = vuln_major_version(meta[1])
+        bucket_key = vuln_bucket_key_values(meta[0], meta[1])
+        globals.vuln_bucket_meta[bucket_key] = [meta[0], major]
+        globals.vuln_dirty_buckets[bucket_key] = 1
+    end if
+end function
+
+
+load_existing_structured_shards = function()
+    shard_count = 0
+    loaded = 0
+    if not is_file_type(typeof(globals.vuln_db_folder)) then return [shard_count, loaded]
+    folders = globals.vuln_db_folder.get_folders
+    if typeof(folders).lower != "list" then return [shard_count, loaded]
+    for library_folder in folders
+        files = library_folder.get_files
+        if typeof(files).lower == "list" then
+            for file in files
+                content = file.get_content
+                if typeof(content).lower != "string" then continue
+                lines = content.replace(char(13), "").split(char(10))
+                if lines.len == 0 then continue
+                header = lines[0].trim
+                if header != "ACVDB2" and header != "ACVDB3" then continue
+                shard_count = shard_count + 1
+                loaded = loaded + load_vuln_content(content)
+            end for
+        end if
+        bucket_folders = library_folder.get_folders
+        if typeof(bucket_folders).lower != "list" then continue
+        for bucket_folder in bucket_folders
+            bucket_files = bucket_folder.get_files
+            if typeof(bucket_files).lower != "list" then continue
+            for file in bucket_files
+                content = file.get_content
+                if typeof(content).lower != "string" then continue
+                lines = content.replace(char(13), "").split(char(10))
+                if lines.len == 0 then continue
+                header = lines[0].trim
+                if header != "ACVDB2" and header != "ACVDB3" then continue
+                shard_count = shard_count + 1
+                loaded = loaded + load_vuln_content(content)
+            end for
+        end for
+    end for
+    return [shard_count, loaded]
+end function
+
+
+migrate_vuln_db = function(legacy_names)
+    existing = load_existing_structured_shards
+    structured_shards = existing[0]
+    loaded = existing[1]
+    for name in legacy_names
+        file = vuln_db_file(name)
+        if is_file_type(typeof(file)) then loaded = loaded + load_vuln_content(file.get_content)
+    end for
+    fingerprint_count = 0
+    for fingerprint in globals.vuln_meta.indexes
+        mark_vuln_dirty(fingerprint)
+        fingerprint_count = fingerprint_count + 1
+    end for
+    if fingerprint_count == 0 then return false
+    if not save_vuln_db then
+        diag("vuln migration failed | structured_shards=" + structured_shards +
+            " | legacy_shards=" + legacy_names.len + " | entries=" + loaded)
+        return false
+    end if
+    diag("vuln migration complete | schema=ACVDB3 | fingerprints=" + fingerprint_count +
+        " | structured_shards=" + structured_shards + " | legacy_shards=" + legacy_names.len +
+        " | entries=" + loaded)
+    return true
+end function
+
+
+load_vuln_db = function()
+    globals.vuln_db = {}
+    globals.vuln_meta = {}
+    globals.vuln_scanned = {}
+    globals.vuln_loaded = {}
+    globals.vuln_loaded_buckets = {}
+    globals.vuln_index = {}
+    globals.vuln_bucket_meta = {}
+    globals.vuln_dirty_fingerprints = {}
+    globals.vuln_dirty_buckets = {}
+    globals.vuln_dirty = false
+    header = load_vuln_index
+    if header != VULN_DB_INDEX_HEADER then
+        legacy_names = legacy_vuln_shard_files
+        migrated = migrate_vuln_db(legacy_names)
+        if not migrated then write_vuln_index
+    end if
+    diag("vuln db ready | schema=" + VULN_DB_INDEX_HEADER + " | index_state=" + header)
+end function
+
+
+vuln_entry_line = function(entry)
+    source = VULN_DB_SOURCE
+    if entry.hasIndex("source") then
+        if entry.source != "" and entry.source != "-" then source = entry.source
+    end if
+    return "V|" + db_field(entry.lib) + "|" + db_field(entry.version) +
+        "|" + db_field(entry.region) + "|" + db_field(entry.unsafe) +
+        "|" + db_field(entry.mode) + "|" + db_field(entry.requirement) +
+        "|" + entry.score + "|" + entry.hits + "|" + entry.attempts +
+        "|" + db_field(entry.last_kind) + "|" + db_field(source)
+end function
+
+
+write_vuln_shard = function(folder, number, lines)
+    name = vuln_shard_name(number)
+    file = vuln_library_file(folder, name, true)
+    if not is_file_type(typeof(file)) then return null
+    content = lines.join(char(10))
+    if content.len > VULN_DB_SHARD_LIMIT then return null
+    if file.set_content(content) != 1 then return null
+    return name
+end function
+
+
+write_vuln_bucket = function(bucket_key)
+    if not globals.vuln_bucket_meta.hasIndex(bucket_key) then return null
+    bucket_meta = globals.vuln_bucket_meta[bucket_key]
+    library = bucket_meta[0]
+    major = bucket_meta[1]
+    folder = vuln_bucket_folder(library, major, true)
+    if not is_file_type(typeof(folder)) then return null
+
+    shard_number = 1
+    shard_lines = ["ACVDB3"]
+    shard_size = 7
+    for fingerprint in globals.vuln_meta.indexes
+        meta = globals.vuln_meta[fingerprint]
+        if vuln_bucket_key_values(meta[0], meta[1]) != bucket_key then continue
+        scan_line = "S|" + db_field(meta[0]) + "|" + db_field(meta[1])
+        if shard_size + scan_line.len + 1 > VULN_DB_SHARD_LIMIT and shard_lines.len > 1 then
+            name = write_vuln_shard(folder, shard_number, shard_lines)
+            if typeof(name).lower != "string" then return null
+            shard_number = shard_number + 1
+            shard_lines = ["ACVDB3"]
+            shard_size = 7
+        end if
+        shard_lines.push(scan_line)
+        shard_size = shard_size + scan_line.len + 1
+        if globals.vuln_db.hasIndex(fingerprint) then
+            for entry in globals.vuln_db[fingerprint]
+                line = vuln_entry_line(entry)
+                if shard_size + line.len + 1 > VULN_DB_SHARD_LIMIT and shard_lines.len > 1 then
+                    name = write_vuln_shard(folder, shard_number, shard_lines)
+                    if typeof(name).lower != "string" then return null
+                    shard_number = shard_number + 1
+                    shard_lines = ["ACVDB3", scan_line]
+                    shard_size = 7 + scan_line.len + 1
+                end if
+                shard_lines.push(line)
+                shard_size = shard_size + line.len + 1
+            end for
+        end if
+    end for
+    name = write_vuln_shard(folder, shard_number, shard_lines)
+    if typeof(name).lower != "string" then return null
+
+    old_count = 0
+    if globals.vuln_index.hasIndex(bucket_key) then old_count = globals.vuln_index[bucket_key].count
+    retired = shard_number + 1
+    while retired <= old_count
+        old_file = vuln_library_file(folder, vuln_shard_name(retired))
+        if is_file_type(typeof(old_file)) then old_file.set_content("ACVDB3")
+        retired = retired + 1
+    end while
+
+    globals.vuln_index[bucket_key] = {
+        "lib": library, "major": major,
+        "folder": db_path_component(library), "bucket": folder.name,
+        "count": shard_number, "source": VULN_DB_SOURCE}
+    return shard_number
+end function
+
+
+write_vuln_index = function()
+    index_file = vuln_db_file("index.txt", true)
+    if not is_file_type(typeof(index_file)) then return false
+    index_lines = [VULN_DB_INDEX_HEADER]
+    for bucket_key in globals.vuln_index.indexes
+        entry = globals.vuln_index[bucket_key]
+        source = VULN_DB_SOURCE
+        if entry.hasIndex("source") then source = entry.source
+        index_lines.push("B|" + db_field(entry.lib) + "|" + db_field(entry.major) +
+            "|" + db_field(entry.folder) + "|" + db_field(entry.bucket) +
+            "|" + entry.count + "|" + db_field(source))
+    end for
+    if index_file.set_content(index_lines.join(char(10))) != 1 then return false
+    return true
+end function
+
+
+save_vuln_db = function()
+    if not globals.vuln_dirty then return true
+    if not is_file_type(typeof(globals.vuln_db_folder)) then return false
+    written = 0
+    for bucket_key in globals.vuln_dirty_buckets.indexes
+        if globals.vuln_dirty_buckets[bucket_key] != 1 then continue
+        count = write_vuln_bucket(bucket_key)
+        if typeof(count).lower != "number" then return false
+        written = written + 1
+    end for
+    if not write_vuln_index then return false
+    globals.vuln_dirty = false
+    globals.vuln_dirty_fingerprints = {}
+    globals.vuln_dirty_buckets = {}
+    diag("vuln db save complete | schema=ACVDB3 | buckets=" + written)
+    return true
+end function
+
+
+scan_vulnerability_entries = function(provider, meta_lib)
+    fingerprint = vuln_fingerprint(meta_lib)
+    load_vuln_bucket(meta_lib)
+    remember_vuln_fingerprint(meta_lib.lib_name, str(meta_lib.version))
+    if globals.vuln_scanned.hasIndex(fingerprint) then return globals.vuln_db[fingerprint]
+    entries = []
+    regions = provider.scan(meta_lib)
+    if typeof(regions).lower != "list" then return entries
+    for region in regions
+        scan_text = provider.scan_address(meta_lib, region)
+        if typeof(scan_text).lower != "string" then continue
+        pieces = scan_text.split("Unsafe check: ")
+        if pieces.len < 2 then continue
+        for piece in pieces[1:]
+            start = piece.indexOf("<b>")
+            finish = piece.indexOf("</b>")
+            if start == null or finish == null then continue
+            if finish <= start + 3 then continue
+            unsafe = piece[start + 3:finish].replace(char(10), "").trim
+            if unsafe == "" then continue
+            requirement = strip_mail_markup(piece[finish + 4:]).replace(char(10), " ").trim
+            while requirement.indexOf("  ") != null
+                requirement = requirement.replace("  ", " ")
+            end while
+            entry = {
+                "lib": meta_lib.lib_name, "version": str(meta_lib.version),
+                "region": region, "unsafe": unsafe,
+                "mode": vuln_requirement_mode(requirement), "requirement": requirement,
+                "score": 0, "hits": 0, "attempts": 0,
+                "last_kind": "untried", "source": VULN_DB_SOURCE}
+            if merge_vuln_entry(fingerprint, entry) then entries.push(entry)
+        end for
+    end for
+    remember_vuln_fingerprint(meta_lib.lib_name, str(meta_lib.version))
+    globals.vuln_scanned[fingerprint] = 1
+    mark_vuln_dirty(fingerprint)
+    diag("vuln scan | library=" + fingerprint + " | entries=" + globals.vuln_db[fingerprint].len)
+    return globals.vuln_db[fingerprint]
+end function
+
+
+ordered_vulnerabilities = function(entries)
+    ordered = []
+    for floor_score in [90, 70, 50, 1, -1000]
+        for entry in entries
+            if floor_score == 90 and entry.score >= 90 then ordered.push(entry)
+            if floor_score == 70 and entry.score >= 70 and entry.score < 90 then ordered.push(entry)
+            if floor_score == 50 and entry.score >= 50 and entry.score < 70 then ordered.push(entry)
+            if floor_score == 1 and entry.score > 0 and entry.score < 50 then ordered.push(entry)
+            if floor_score == -1000 and entry.score <= 0 then ordered.push(entry)
+        end for
+    end for
+    return ordered
+end function
+
+
+requirement_ready = function(entry, session)
+    if not is_net_session(session) then return true
+    lowered = entry.requirement.lower
+    needs_root = lowered.indexOf("root active") != null or lowered.indexOf("active root") != null
+    if needs_root and not session.is_root_active_user then return false
+    needs_user = lowered.indexOf("active user") != null
+    if needs_user and not session.is_any_active_user then return false
+    return true
+end function
+
+
+overflow_arguments = function(entry, contract)
+    if entry.mode == "password" then return [CREDENTIAL_INJECT]
+    if entry.mode == "lan" then return [contract.lan]
+    if entry.mode == "plain" then return ["__AC_PLAIN__"]
+    return [contract.lan, CREDENTIAL_INJECT, "__AC_PLAIN__"]
+end function
+
+
+record_vuln_result = function(entry, result)
+    entry.attempts = entry.attempts + 1
+    kind = typeof(result).lower
+    entry.last_kind = kind
+    score = 0
+    if is_exploit_object(result) then entry.hits = entry.hits + 1
+    computer = computer_from_value(result)
+    level = access_level(result)
+    if computer and level == "root" then
+        score = 100
+    else if level == "root" then
+        score = 95
+    else if level == "user" then
+        score = 70
+    else if kind == "shell" or kind == "ftpshell" then
+        score = 50
+    else if kind == "file" then
+        passwd = passwd_file_from(result)
+        if is_file_type(typeof(passwd)) then
+            if passwd.has_permission("r") then
+                score = 40
+            else
+                score = 20
+            end if
+        else
+            score = 20
+        end if
+    else if kind == "computer" then
+        score = 30
+    else if kind == "number" then
+        score = 10
+    end if
+    if score > entry.score then entry.score = score
+    mark_vuln_dirty(entry.lib + "@" + entry.version)
+end function
+
+
+scan_and_fire = function(provider, meta_lib, session, contract)
+    results = []
+    entries = scan_vulnerability_entries(provider, meta_lib)
+    diag("vuln use | library=" + vuln_fingerprint(meta_lib) + " | entries=" + entries.len)
+    for entry in ordered_vulnerabilities(entries)
+        if not requirement_ready(entry, session) then continue
+        for argument in overflow_arguments(entry, contract)
+            if argument == "__AC_PLAIN__" then
+                result = meta_lib.overflow(entry.region, entry.unsafe)
+            else
+                result = meta_lib.overflow(entry.region, entry.unsafe, argument)
+            end if
+            record_vuln_result(entry, result)
+            if result == null then continue
+            kind = typeof(result).lower
+            if entry.mode == "unknown" and is_exploit_object(result) then
+                if argument == "__AC_PLAIN__" then entry.mode = "plain"
+                if argument == CREDENTIAL_INJECT then entry.mode = "password"
+                if argument == contract.lan then entry.mode = "lan"
+            end if
+            if is_exploit_object(result) or kind == "number" then results.push(result)
+            if is_exploit_object(result) then
+                role = "route"
+                if is_exact_contract_host(result, contract) then role = "target"
+                stage_log_finalizer(result, role)
+                capture_root_password(result, contract)
+            end if
+            if results.len >= MAX_OBJECTS_PER_ENDPOINT then return results
+        end for
+    end for
+    return results
+end function
+
+
+service_protocol = function(meta_lib)
+    if not is_meta_lib(meta_lib) then return null
+    name = meta_lib.lib_name.lower
+    if name.indexOf("ssh") != null then return "ssh"
+    if name.indexOf("ftp") != null then return "ftp"
+    return null
+end function
+
+
+connect_root_password = function(connection_shell, ip, port, protocol, password, contract)
+    if not is_shell_type(typeof(connection_shell)) then return null
+    if typeof(protocol).lower != "string" then return null
+    connected = connection_shell.connect_service(ip, port, "root", password, protocol)
+    if not is_exploit_object(connected) then return null
+    if not is_exact_contract_host(connected, contract) then return null
+    stage_log_finalizer(connected, "target")
+    return connected
+end function
+
+
+attack_endpoint = function(provider, ip, port, contract, connection_shell, exact_hint = false, force = false)
+    candidates = []
+    endpoint_key = ip + ":" + port + "|" + yes_no(exact_hint)
+    if globals.attempted_endpoints.hasIndex(endpoint_key) and not force then return candidates
+    globals.attempted_endpoints[endpoint_key] = 1
+    diag("endpoint " + endpoint_key)
+    if port == 0 then
+        session = provider.net_use(ip)
+    else
+        session = provider.net_use(ip, port)
+    end if
+    if not is_net_session(session) then return candidates
+    meta_lib = session.dump_lib
+    if not is_meta_lib(meta_lib) then return candidates
+
+    protocol = service_protocol(meta_lib)
+    if protocol and is_shell_type(typeof(connection_shell)) then
+        if globals.network_root_passwords.hasIndex(contract.ip) then
+            connected = connect_root_password(connection_shell, ip, port, protocol,
+                globals.network_root_passwords[contract.ip], contract)
+            if connected then
+                candidates.push({"value": connected, "exact_hint": true, "endpoint": endpoint_key})
+                return candidates
+            end if
+        end if
+    end if
+
+    raw_results = scan_and_fire(globals.metaxploit, meta_lib, session, contract)
+    password_changed = false
+    for result in raw_results
+        if typeof(result).lower == "number" then
+            password_changed = true
+            continue
+        end if
+        if not is_exploit_object(result) then continue
+        candidates.push({"value": result, "exact_hint": exact_hint, "endpoint": endpoint_key})
+    end for
+
+    if protocol and is_shell_type(typeof(connection_shell)) then
+        for result in raw_results
+            root_password = capture_root_password(result, contract)
+            if typeof(root_password).lower != "string" then continue
+            connected = connect_root_password(connection_shell, ip, port, protocol, root_password, contract)
+            if connected then
+                candidates.push({"value": connected, "exact_hint": true, "endpoint": endpoint_key})
+                break
+            end if
+        end for
+
+        if password_changed and (session.is_any_active_user or session.is_root_active_user) then
+            users = ["root"]
+            if typeof(contract.user).lower == "string" then users.push(contract.user)
+            users.push("guest")
+            for user in users
+                connected = connection_shell.connect_service(ip, port, user, CREDENTIAL_INJECT, protocol)
+                if not is_exploit_object(connected) then continue
+                stage_log_finalizer(connected, "target")
+                candidates.push({"value": connected, "exact_hint": exact_hint, "endpoint": endpoint_key})
+                if is_exact_contract_host(connected, contract) then break
+            end for
+        end if
+    end if
+    return candidates
+end function
+
+
+route_ports = function(router, contract)
+    exact_external = []
+    other_external = []
+    internal = []
+    if not is_route_device(router) then
+        return {"exact_external": exact_external, "other_external": other_external, "internal": [80, 22, 21, 3306]}
+    end if
+    used = router.used_ports
+    if typeof(used).lower == "list" then
+        for port_object in used
+            if typeof(port_object).lower != "port" then continue
+            if port_object.get_lan_ip == contract.lan then
+                add_unique_number(exact_external, port_object.port_number)
+            else
+                add_unique_number(other_external, port_object.port_number)
+            end if
+        end for
+    end if
+    inside = router.device_ports(contract.lan)
+    if typeof(inside).lower == "list" then
+        for port_object in inside
+            if typeof(port_object).lower != "port" then continue
+            add_unique_number(internal, port_object.port_number)
+        end for
+    end if
+    if internal.len == 0 then internal = [80, 22, 21, 3306]
+    return {"exact_external": exact_external, "other_external": other_external, "internal": internal}
+end function
+
+
+result_exists = function(mail_id)
+    for row in globals.program_results
+        if row.mail_id == mail_id then return true
+    end for
+    return false
+end function
+
+
+task_line = function(contract)
+    user_text = contract.user
+    if not user_text then user_text = "ANY"
+    return "T|" + db_field(contract.mail_id) + "|" + db_field(contract.ip) +
+        "|" + db_field(contract.lan) + "|" + db_field(user_text)
+end function
+
+
+write_pending_tasks = function(contracts)
+    if not is_file_type(typeof(globals.task_folder)) then return false
+    file = globals.local_computer.File(TASK_PATH)
+    if not is_file_type(typeof(file)) then
+        if globals.local_computer.touch(globals.task_folder.path, "current.txt") != 1 then return false
+        file = globals.local_computer.File(TASK_PATH)
+    end if
+    if not is_file_type(typeof(file)) then return false
+    lines = [TASK_HEADER]
+    for contract in contracts
+        lines.push(task_line(contract))
+    end for
+    return file.set_content(lines.join(char(10))) == 1
+end function
+
+
+forget_pending_contract = function(mail_id)
+    remaining = []
+    for contract in globals.pending_contracts
+        if contract.mail_id == mail_id then continue
+        remaining.push(contract)
+    end for
+    globals.pending_contracts = remaining
+    write_pending_tasks(remaining)
+end function
+
+
+save_result = function(contract, password, recovered_user = "")
+    if result_exists(contract.mail_id) then return true
+
+    row = {
+        "index": contract.index,
+        "mail_id": contract.mail_id,
+        "ip": contract.ip,
+        "lan": contract.lan,
+        "user": contract.user,
+        "recovered_user": recovered_user,
+        "password": password}
+    globals.program_results.push(row)
+    requested_text = contract.user
+    if not requested_text then requested_text = "ANY"
+    diag_critical("credential recovered | contract=" + contract.index +
+        " | host=" + contract.ip + "/" + contract.lan +
+        " | requested=" + requested_text)
+    return true
+end function
+
+
+writable_folder = function(computer)
+    if not computer then return null
+    candidates = []
+    root_home = computer.File("/root")
+    if is_file_type(typeof(root_home)) then candidates.push(root_home)
+    home = computer.File("/home")
+    if is_file_type(typeof(home)) then
+        folders = home.get_folders
+        if typeof(folders).lower == "list" then
+            for folder in folders
+                candidates.push(folder)
+            end for
+        end if
+    end if
+    for folder in candidates
+        if not folder.is_folder then continue
+        if not folder.has_permission("w") then continue
+        if not folder.has_permission("x") then continue
+        return folder
+    end for
+    return null
+end function
+
+
+import_remote_context = function(remote_shell, target_lan = "", root_password = "")
+    context = {"provider": null, "ports": [], "router_ip": "", "child_routers": [], "root_shell": null}
+    if not is_shell_type(typeof(remote_shell)) then return context
+    computer = computer_from_value(remote_shell)
+    if not computer then return context
+    work = writable_folder(computer)
+    if not is_file_type(typeof(work)) then return context
+
+    remote_lib_path = join_path(work.path, "metaxploit.so")
+    remote_lib = computer.File(remote_lib_path)
+    if not is_file_type(typeof(remote_lib)) then
+        globals.local_shell.scp("/lib/metaxploit.so", work.path, remote_shell)
+        remote_lib = computer.File(remote_lib_path)
+    end if
+    if not is_file_type(typeof(remote_lib)) then return context
+
+    source_path = join_path(work.path, "acjump.src")
+    source_file = computer.File(source_path)
+    if not is_file_type(typeof(source_file)) then
+        if computer.touch(work.path, "acjump.src") != 1 then return context
+        source_file = computer.File(source_path)
+    end if
+    if not is_file_type(typeof(source_file)) then return context
+
+    source = "interop = get_custom_object()" + char(10) +
+        "interop.ac_provider = include_lib(params[0])" + char(10) +
+        "interop.ac_ports = []" + char(10) +
+        "interop.ac_router_ip = """"" + char(10) +
+        "interop.ac_child_routers = []" + char(10) +
+        "interop.ac_root_shell = null" + char(10) +
+        "if params.len > 1 then" + char(10) +
+        "    router = get_router" + char(10) +
+        "    if not router then router = get_switch" + char(10) +
+        "    if router then" + char(10) +
+        "        interop.ac_router_ip = router.local_ip" + char(10) +
+        "        target_ports = router.device_ports(params[1])" + char(10) +
+        "        if typeof(target_ports).lower == ""list"" then" + char(10) +
+        "            for target_port in target_ports" + char(10) +
+        "                if typeof(target_port).lower == ""port"" then interop.ac_ports.push(target_port.port_number)" + char(10) +
+        "            end for" + char(10) +
+        "        end if" + char(10) +
+        "        devices = router.devices_lan_ip" + char(10) +
+        "        if typeof(devices).lower == ""list"" then" + char(10) +
+        "            for device_ip in devices" + char(10) +
+        "                child = get_router(device_ip)" + char(10) +
+        "                if not child then child = get_switch(device_ip)" + char(10) +
+        "                if typeof(child).lower == ""router"" or typeof(child).lower == ""switch"" then interop.ac_child_routers.push(device_ip)" + char(10) +
+        "            end for" + char(10) +
+        "        end if" + char(10) +
+        "    end if" + char(10) +
+        "end if" + char(10) +
+        "if params.len > 2 then interop.ac_root_shell = get_shell(""root"", params[2])" + char(10)
+    if source_file.set_content(source) != 1 then return context
+    build_result = remote_shell.build(source_path, work.path, false)
+    if typeof(build_result).lower == "string" then
+        if build_result.len > 0 then return context
+    end if
+    if typeof(build_result).lower == "list" then
+        if build_result.len > 0 then return context
+    end if
+
+    bridge = get_custom_object
+    bridge.ac_provider = null
+    bridge.ac_ports = []
+    bridge.ac_router_ip = ""
+    bridge.ac_child_routers = []
+    bridge.ac_root_shell = null
+    launch_params = remote_lib_path
+    if target_lan != "" then launch_params = launch_params + " " + target_lan
+    if root_password != "" then launch_params = launch_params + " " + root_password
+    remote_shell.launch(join_path(work.path, "acjump"), launch_params)
+    context.provider = bridge.ac_provider
+    context.ports = bridge.ac_ports
+    context.router_ip = bridge.ac_router_ip
+    context.child_routers = bridge.ac_child_routers
+    context.root_shell = bridge.ac_root_shell
+    bridge.ac_provider = null
+    bridge.ac_ports = []
+    bridge.ac_router_ip = ""
+    bridge.ac_child_routers = []
+    bridge.ac_root_shell = null
+    return context
+end function
+
+
+stage_poison_http = function(remote_shell)
+    if POISON_HTTP_SOURCE == "" then return null
+    if not is_shell_type(typeof(remote_shell)) then return null
+    local_poison = globals.local_computer.File(POISON_HTTP_SOURCE)
+    if not is_file_type(typeof(local_poison)) then return null
+    if not local_poison.has_permission("r") then return null
+    computer = computer_from_value(remote_shell)
+    if not computer then return null
+    work = writable_folder(computer)
+    if not is_file_type(typeof(work)) then return null
+    staged_path = join_path(work.path, "libhttp.so")
+    staged = computer.File(staged_path)
+    if is_file_type(typeof(staged)) then staged.delete
+    globals.local_shell.scp(POISON_HTTP_SOURCE, work.path, remote_shell)
+    if is_file_type(typeof(computer.File(staged_path))) then return staged_path
+    return null
+end function
+
+
+poison_host_http = function(remote_provider, admin_value, staged_path)
+    if not is_metaxploit(remote_provider) then return null
+    computer = computer_from_value(admin_value)
+    if not computer then return null
+    if access_level(computer) != "root" then return null
+    staged = computer.File(staged_path)
+    if not is_file_type(typeof(staged)) then return null
+    work_path = staged.parent.path
+    original = computer.File("/lib/http.so")
+    backup_path = join_path(work_path, "ac_http_original.so")
+    backup = computer.File(backup_path)
+    if is_file_type(typeof(backup)) then backup.delete
+    if is_file_type(typeof(original)) then
+        original.copy(work_path, "ac_http_original.so")
+        backup = computer.File(backup_path)
+        if not is_file_type(typeof(backup)) then return null
+        original.delete
+    end if
+    staged.copy("/lib", "http.so")
+    replacement = computer.File("/lib/http.so")
+    if not is_file_type(typeof(replacement)) then
+        if is_file_type(typeof(backup)) then backup.copy("/lib", "http.so")
+        return null
+    end if
+    poison_meta = remote_provider.load(replacement.path)
+    if not is_meta_lib(poison_meta) then
+        replacement.delete
+        if is_file_type(typeof(backup)) then backup.copy("/lib", "http.so")
+        return null
+    end if
+    if is_file_type(typeof(backup)) then backup.delete
+    diag("PoisonLib ready | host=" + computer.public_ip + "/" + computer.local_ip)
+    return poison_meta
+end function
+
+
+try_candidates = function(candidates, contract)
+    for candidate in sort_candidates(candidates, contract)
+        if not candidate_exact(candidate, contract) then continue
+        credential = credential_from_value(contract.user, candidate.value)
+        if not credential then continue
+        print(paint("Credential found: ", COLOR_GREEN) + paint(credential.password, COLOR_PINK))
+        save_result(contract, credential.password, credential.user)
+        return true
+    end for
+    return false
+end function
+
+
+add_route_shell = function(shells, candidate)
+    value = candidate.value
+    if not is_shell_type(typeof(value)) then return
+    for known in shells
+        if is_same_host(known.value, value) then return
+    end for
+    shells.push(candidate)
+    computer = computer_from_value(value)
+    diag("route shell added | host=" + computer.public_ip + "/" + computer.local_ip + " | total=" + shells.len)
+end function
+
+
+attack_host_libraries = function(remote_provider, target_computer, contract)
+    candidates = []
+    if not is_metaxploit(remote_provider) then return candidates
+    if not target_computer then return candidates
+    lib_folder = target_computer.File("/lib")
+    if not is_file_type(typeof(lib_folder)) then return candidates
+    libraries = lib_folder.get_files
+    if typeof(libraries).lower != "list" then return candidates
+    paths = []
+    for preferred in ["init.so", "kernel_module.so", "net.so"]
+        for library in libraries
+            if library.name == preferred then add_unique_string(paths, library.path)
+        end for
+    end for
+    for library in libraries
+        if library.name.indexOf(".so") != null then add_unique_string(paths, library.path)
+    end for
+    exact_hint = target_computer.public_ip == contract.ip and target_computer.local_ip == contract.lan
+    for path in paths
+        meta_lib = remote_provider.load(path)
+        if not is_meta_lib(meta_lib) then continue
+        for result in scan_and_fire(globals.metaxploit, meta_lib, null, contract)
+            if not is_exploit_object(result) then continue
+            if not is_file_type(typeof(result)) then
+                result_computer = computer_from_value(result)
+                if result_computer then
+                    if result_computer.public_ip != target_computer.public_ip then continue
+                    if result_computer.local_ip != target_computer.local_ip then continue
+                end if
+            end if
+            candidates.push({"value": result, "exact_hint": exact_hint, "endpoint": "hostlib:" + path})
+            if candidates.len >= MAX_OBJECTS_PER_ENDPOINT then return candidates
+        end for
+    end for
+    return candidates
+end function
+
+
+try_route_shell = function(route_candidate, contract, internal_ports, route_shells)
+    if try_candidates([route_candidate], contract) then return true
+    shell = route_candidate.value
+    if not is_shell_type(typeof(shell)) then return false
+    computer = computer_from_value(shell)
+    if not computer then return false
+    root_password = capture_root_password(shell, contract)
+    if typeof(root_password).lower != "string" then root_password = ""
+    context = import_remote_context(shell, contract.lan, root_password)
+    if is_shell_type(typeof(context.root_shell)) then
+        root_candidate = {"value": context.root_shell, "exact_hint": route_candidate.exact_hint, "endpoint": "root-escalation"}
+        stage_log_finalizer(context.root_shell, "route-root")
+        if try_candidates([root_candidate], contract) then return true
+        shell = context.root_shell
+        computer = computer_from_value(shell)
+        if not computer then return false
+    end if
+    if not is_metaxploit(context.provider) then return false
+
+    host_candidates = attack_host_libraries(context.provider, computer, contract)
+    if try_candidates(host_candidates, contract) then return true
+    for candidate in host_candidates
+        add_route_shell(route_shells, candidate)
+        capture_root_password(candidate.value, contract)
+    end for
+    root_password = capture_root_password(computer, contract)
+    if typeof(root_password).lower == "string" then
+        elevated = import_remote_context(shell, contract.lan, root_password)
+        if is_shell_type(typeof(elevated.root_shell)) then
+            root_candidate = {"value": elevated.root_shell, "exact_hint": route_candidate.exact_hint, "endpoint": "rehack-root"}
+            stage_log_finalizer(elevated.root_shell, "route-root")
+            if try_candidates([root_candidate], contract) then return true
+            shell = elevated.root_shell
+            computer = computer_from_value(shell)
+            if not computer then return false
+            if is_metaxploit(elevated.provider) then context.provider = elevated.provider
+        end if
+    end if
+
+    for port in context.ports
+        add_unique_number(internal_ports, port)
+    end for
+    for port in internal_ports
+        print("  " + paint("Exact LAN", COLOR_CYAN) + " " + contract.lan + ":" + port)
+        candidates = attack_endpoint(context.provider, contract.lan, port, contract, shell, true)
+        if try_candidates(candidates, contract) then return true
+        for candidate in candidates
+            add_route_shell(route_shells, candidate)
+        end for
+    end for
+
+    router_hops = []
+    add_unique_string(router_hops, context.router_ip)
+    for child in context.child_routers
+        add_unique_string(router_hops, child)
+    end for
+    for router_ip in router_hops
+        candidates = attack_endpoint(context.provider, router_ip, 0, contract, shell, false)
+        if try_candidates(candidates, contract) then return true
+        for candidate in candidates
+            add_route_shell(route_shells, candidate)
+        end for
+    end for
+
+    if is_router_computer(computer) and access_level(computer) == "root" then
+        staged_path = stage_poison_http(shell)
+        if typeof(staged_path).lower == "string" then
+            poison_meta = poison_host_http(context.provider, shell, staged_path)
+            if is_meta_lib(poison_meta) then
+                raw_results = scan_and_fire(globals.metaxploit, poison_meta, null, contract)
+                poison_candidates = []
+                for result in raw_results
+                    if is_exploit_object(result) then
+                        poison_candidates.push({"value": result, "exact_hint": is_file_type(typeof(result)), "endpoint": "poison"})
+                    end if
+                end for
+                if try_candidates(poison_candidates, contract) then return true
+                for candidate in poison_candidates
+                    add_route_shell(route_shells, candidate)
+                end for
+            end if
+        end if
+    end if
+    return false
+end function
+
+
+hack_contract = function(contract)
+    globals.attempted_endpoints = {}
+    globals.contract_log_finalizers = []
+    globals.contract_log_finalizer_keys = {}
+    router = get_router(contract.ip)
+    if not router then router = get_switch(contract.ip)
+    if not is_route_device(router) then
+        diag("contract failed | router unavailable")
+        return false
+    end if
+    ports = route_ports(router, contract)
+    diag("route map | exact_external=" + ports.exact_external.join(",") +
+        " | other_external=" + ports.other_external.join(",") +
+        " | internal=" + ports.internal.join(","))
+    route_shells = []
+
+    for port in ports.exact_external
+        print("  " + paint("Exact target", COLOR_CYAN) + " " + contract.ip + ":" + port)
+        candidates = attack_endpoint(globals.metaxploit, contract.ip, port, contract, globals.local_shell, true)
+        if try_candidates(candidates, contract) then return true
+        for candidate in candidates
+            add_route_shell(route_shells, candidate)
+        end for
+    end for
+
+    print("  " + paint("Router bounce", COLOR_PURPLE) + " -> " + paint(contract.lan, COLOR_CYAN))
+    candidates = attack_endpoint(globals.metaxploit, contract.ip, 0, contract, globals.local_shell, true)
+    if try_candidates(candidates, contract) then return true
+    for candidate in candidates
+        add_route_shell(route_shells, candidate)
+    end for
+
+    // Firewall-changing overflows can expose the exact forwarded service. Pull
+    // a fresh map once, then spend the new information before broad footholds.
+    refreshed_router = get_router(contract.ip)
+    if not refreshed_router then refreshed_router = get_switch(contract.ip)
+    if is_route_device(refreshed_router) then
+        refreshed = route_ports(refreshed_router, contract)
+        for port in refreshed.exact_external
+            add_unique_number(ports.exact_external, port)
+        end for
+        for port in refreshed.other_external
+            add_unique_number(ports.other_external, port)
+        end for
+        for port in refreshed.internal
+            add_unique_number(ports.internal, port)
+        end for
+        diag("refreshed route map | exact_external=" + ports.exact_external.join(",") +
+            " | other_external=" + ports.other_external.join(",") +
+            " | internal=" + ports.internal.join(","))
+    end if
+    for port in ports.exact_external
+        candidates = attack_endpoint(globals.metaxploit, contract.ip, port, contract, globals.local_shell, true)
+        if try_candidates(candidates, contract) then return true
+        for candidate in candidates
+            add_route_shell(route_shells, candidate)
+        end for
+    end for
+
+    for port in ports.other_external
+        print("  Network foothold " + contract.ip + ":" + port)
+        candidates = attack_endpoint(globals.metaxploit, contract.ip, port, contract, globals.local_shell, false)
+        if try_candidates(candidates, contract) then return true
+        for candidate in candidates
+            add_route_shell(route_shells, candidate)
+        end for
+    end for
+
+    // A named-user foothold may have taught us the network root password. Retry
+    // the exact forwarded services before spending it on longer route chains.
+    if globals.network_root_passwords.hasIndex(contract.ip) then
+        for port in ports.exact_external
+            candidates = attack_endpoint(globals.metaxploit, contract.ip, port, contract, globals.local_shell, true, true)
+            if try_candidates(candidates, contract) then return true
+        end for
+    end if
+
+    index = 0
+    while index < route_shells.len and index < MAX_ROUTE_SHELLS
+        route_candidate = route_shells[index]
+        index = index + 1
+        diag("route attempt | index=" + index + " | queued=" + route_shells.len)
+        if try_route_shell(route_candidate, contract, ports.internal, route_shells) then return true
+    end while
+    diag("contract failed | all targeted access paths exhausted")
+    return false
+end function
+
+
+is_completed_contract = function(body)
+    plain = strip_mail_markup(body).lower
+    if plain.indexOf("customer is satisfied") != null then return true
+    if plain.indexOf("there has been an income in your account") != null then return true
+    if plain.indexOf("income in your account") != null then return true
+    return false
+end function
+
+
+load_contracts = function(records)
+    contracts = []
+    if typeof(records).lower != "list" then return null
+
+    for record in records
+        if contracts.len >= MAX_MAILS then break
+        if typeof(record).lower != "map" then continue
+        summary = record.summary
+        header = record.header
+        if typeof(header).lower != "map" then header = parse_mail_header(summary)
+        if not header then continue
+        if header.subject.lower != "mission contract" then continue
+
+        body = record.body
+        if typeof(body) != "string" then
+            print("Skipping mail " + header.id + ": unable to read it on this build.")
+            continue
+        end if
+        if is_completed_contract(body) then
+            diag("mail skipped | id=" + header.id + " | reason=completed")
+            continue
+        end if
+
+        contract = parse_contract(body, header.id, contracts.len)
+        if not contract then
+            print("Skipping mail " + header.id + ": not a classic credential contract or format changed.")
+            continue
+        end if
+
+        contracts.push(contract)
+    end for
+    diag_critical("mail load complete | current_contracts=" + contracts.len)
+    return contracts
+end function
+
+
+print_contracts = function(contracts)
+    print("<size=125%><b>" + paint("Credential contracts", COLOR_PURPLE) + "</b></size>")
+    if contracts.len == 0 then
+        print(paint("No current credential contracts were returned. Use fresh or refresh to try again.", COLOR_RED))
+        return
+    end if
+    for contract in contracts
+        user_text = contract.user
+        if not user_text then user_text = "ANY"
+        print("[" + contract.index + "] " + paint(contract.ip, COLOR_CYAN) + " / " +
+            paint(contract.lan, COLOR_CYAN) + " / " + paint(user_text, COLOR_PINK))
+    end for
+end function
+
+
+refresh_meta_mail_contracts = function()
+    diag_critical("mail refresh requested | previous snapshot discarded")
+    records = collect_fresh_mail_records
+    if typeof(records).lower != "list" then
+        print(paint("Fresh-process MetaMail refresh failed; keeping the current displayed list.", COLOR_RED))
+        diag_critical("mail refresh failed | fresh process and direct fallback unavailable")
+        return null
+    end if
+    refreshed_contracts = load_contracts(records)
+    if typeof(refreshed_contracts).lower != "list" then return null
+    diag_critical("mail refresh complete | contracts=" + refreshed_contracts.len)
+    return refreshed_contracts
+end function
+
+
+select_contracts = function(contracts)
+    current_contracts = contracts
+    while true
+        choice = user_input(
+            "Indexes separated by spaces (Enter or all = all; fresh/refresh = reload; q = quit): ").trim
+        lowered = choice.lower
+        if lowered == "fresh" or lowered == "refresh" then
+            refreshed = refresh_meta_mail_contracts
+            if typeof(refreshed).lower == "list" then
+                current_contracts = refreshed
+                print_contracts(current_contracts)
+            end if
+            continue
+        end if
+        if lowered == "q" then return []
+        if choice == "" or lowered == "all" then
+            if current_contracts.len > 0 then return current_contracts
+            print(paint("There are no contracts to select. Use fresh/refresh or q.", COLOR_RED))
+            continue
+        end if
+
+        selected = []
+        selected_indexes = []
+        for token in choice.split(" ")
+            token = token.trim
+            if token == "" then continue
+
+            index = token.to_int
+            if typeof(index) != "number" then
+                print("Skipping invalid index: " + token)
+                continue
+            end if
+            if index < 0 then
+                print("Skipping out-of-range index: " + token)
+                continue
+            end if
+            if index >= current_contracts.len then
+                print("Skipping out-of-range index: " + token)
+                continue
+            end if
+            if selected_indexes.indexOf(index) != null then continue
+
+            selected_indexes.push(index)
+            selected.push(current_contracts[index])
+        end for
+        if selected.len > 0 then return selected
+        print(paint("No valid contracts selected. Choose indexes, all, fresh/refresh, or q.", COLOR_RED))
+    end while
+end function
+
+
+print_summary = function()
+    print(char(10) + "<size=125%><b>" + paint("AutoCred results", COLOR_PURPLE) + "</b></size>")
+    success = 0
+    for result in globals.run_results
+        if result.ok then
+            success = success + 1
+            print(paint("[" + result.index + "] OK", COLOR_GREEN) + "   " +
+                paint(result.ip, COLOR_CYAN) + " / " + paint(result.lan, COLOR_CYAN))
+        else
+            print(paint("[" + result.index + "] FAIL", COLOR_RED) + " " +
+                paint(result.ip, COLOR_CYAN) + " / " + paint(result.lan, COLOR_CYAN) +
+                " - targeted access exhausted")
+        end if
+    end for
+    if globals.program_results.len > 0 then
+        print(char(10) + paint("Recovered credentials", COLOR_GREEN))
+        for row in globals.program_results
+            requested = row.user
+            if not requested then requested = "ANY"
+            recovered_user = row.recovered_user
+            if recovered_user == "" then recovered_user = requested
+            print("[" + row.index + "] " + paint(row.ip, COLOR_CYAN) + " / " +
+                paint(row.lan, COLOR_CYAN) + " / " + paint(recovered_user, COLOR_PINK) +
+                " / " + paint(row.password, COLOR_GREEN))
+        end for
+    end if
+    print(paint("Completed " + success + " of " + globals.run_results.len + " selected credential job(s).", COLOR_GREEN))
+    print("Credentials are not submitted automatically. Reply to each matching contract in Mail.exe with its password.")
+    if globals.debug_paths.len > 0 then print("Diagnostic log(s): " + globals.debug_paths.join(", "))
+end function
+
+
+// ------------------------------ startup ------------------------------
+
+if params.len > 0 then
+    if not mail_intake_child_requested then
+        if params.len == 1 then
+            if params[0] == "-h" or params[0] == "--help" then exit(show_usage)
+        end if
+        exit(show_usage)
+    end if
+end if
+
+globals.local_shell = get_shell
+if not is_shell_type(typeof(globals.local_shell)) then exit("Unable to access the local shell.")
+globals.local_computer = computer_from_value(globals.local_shell)
+if not globals.local_computer then exit("Unable to access the local computer.")
+if not globals.local_computer.is_network_active then exit("Network is not active.")
+
+globals.log_seq = 0
+globals.debug_file = null
+globals.debug_paths = []
+globals.debug_pending = []
+globals.debug_file_failed = false
+globals.debug_part = 0
+globals.debug_run_id = 0
+globals.autoscripts_folder = null
+globals.app_folder = null
+globals.task_folder = null
+globals.log_folder = null
+globals.vuln_db_folder = null
+globals.vuln_db = {}
+globals.vuln_meta = {}
+globals.vuln_scanned = {}
+globals.vuln_loaded = {}
+globals.vuln_loaded_buckets = {}
+globals.vuln_index = {}
+globals.vuln_bucket_meta = {}
+globals.vuln_dirty_fingerprints = {}
+globals.vuln_dirty_buckets = {}
+globals.vuln_dirty = false
+globals.program_results = []
+globals.run_results = []
+globals.pending_contracts = []
+globals.attempted_endpoints = {}
+globals.root_passwords = {}
+globals.network_root_passwords = {}
+globals.root_password_attempted = {}
+globals.contract_log_finalizers = []
+globals.contract_log_finalizer_keys = {}
+
+init_runtime_storage
+if mail_intake_child_requested then run_mail_intake_child
+
+globals.metaxploit = include_lib("/lib/metaxploit.so")
+if not is_metaxploit(globals.metaxploit) then
+    exit("Missing or incompatible /lib/metaxploit.so.")
+end if
+
+globals.crypto = include_lib("/lib/crypto.so")
+if typeof(globals.crypto).lower != "cryptolib" then
+    exit("Missing or incompatible /lib/crypto.so.")
+end if
+
+init_debug_log
+diag_critical("startup | version=" + SCRIPT_VERSION +
+    " | execution_host=" + globals.local_computer.public_ip + "/" + globals.local_computer.local_ip)
+load_vuln_db
+
+entered_pin = user_input("PIN: ", 1)
+if PIN != "" then
+    if entered_pin != PIN then exit("Incorrect PIN.")
+end if
+
+mail_user = MAIL_USER
+mail_password = MAIL_PASSWORD
+if mail_user == "" then mail_user = user_mail_address
+if mail_password == "" then mail_password = entered_pin
+if mail_user == "" then exit("No active MetaMail address was found.")
+if mail_password == "" then exit("Missing MetaMail password.")
+globals.mail_user = mail_user
+globals.mail_password = mail_password
+
+print(paint("AutoCred " + SCRIPT_VERSION, COLOR_PURPLE))
+mail_records = collect_fresh_mail_records
+if typeof(mail_records).lower != "list" then exit("MetaMail login or fetch failed.")
+contracts = load_contracts(mail_records)
+if typeof(contracts).lower != "list" then exit("Credential mail snapshot could not be parsed.")
+if contracts.len == 0 then
+    write_pending_tasks([])
+end if
+
+print_contracts(contracts)
+selected = select_contracts(contracts)
+if selected.len == 0 then exit("No valid contracts selected.")
+globals.pending_contracts = selected
+write_pending_tasks(globals.pending_contracts)
+
+position = 0
+for contract in selected
+    position = position + 1
+    user_text = contract.user
+    if not user_text then user_text = "ANY"
+    print(char(10) + paint("[" + position + "/" + selected.len + "]", COLOR_PURPLE) + " " +
+        paint(contract.ip, COLOR_CYAN) + " / " + paint(contract.lan, COLOR_CYAN) +
+        " / " + paint(user_text, COLOR_PINK))
+    diag_critical("contract start | index=" + contract.index + " | target=" +
+        contract.ip + "/" + contract.lan + " | user=" + user_text)
+    ok = hack_contract(contract)
+    if not ok then print(paint("No targeted credential path succeeded.", COLOR_RED))
+    log_summary = finalize_contract_logs(contract)
+    globals.run_results.push({
+        "index": contract.index,
+        "ip": contract.ip,
+        "lan": contract.lan,
+        "ok": ok,
+        "logs": log_summary.completed})
+    save_vuln_db
+    forget_pending_contract(contract.mail_id)
+end for
+
+write_pending_tasks([])
+save_vuln_db
+flush_debug
+print_summary

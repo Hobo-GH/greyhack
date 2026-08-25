@@ -1,0 +1,2488 @@
+//Made By Hobo & Rowan
+// AutoCorrupt 1.0.0-rc1-public
+// Classic Corrupt Data contracts only.  One PIN, one selection, automatic work.
+// Target baseline: Grey Hack Public v0.9.6773.
+// Public configuration template: fill private route values locally and never publish them.
+
+SCRIPT_VERSION = "1.0.0-rc1-public"
+
+// Optional overrides.  Leave blank to use the active player's mail address and
+// the single masked PIN prompt as the MetaMail password.
+MAIL_USER = ""
+MAIL_PASSWORD = ""
+PIN = ""
+
+MAX_MAILS = 100
+RSHELL_PROCESS = "ac"
+RSHELL_SERVER_IP = ""
+RSHELL_SERVER_PORT = 0
+RSHELL_SERVER_SSH_PORT = 22
+RSHELL_SERVER_SSH_USER = ""
+RSHELL_SERVER_SSH_PASSWORD = ""
+MAX_ROUTE_SHELLS = 12
+POISON_HTTP_SOURCE = "/root/PoisonLibs/libhttp.so"
+CREDENTIAL_INJECT = "ac2026"
+DIAGNOSTIC_LOG = true
+DEBUG_FILE_LIMIT = 150000
+DEBUG_FILE_PREFIX = "autocorrupt-debug"
+DEBUG_FLUSH_LINES = 12
+VULN_DB_PATH = "/root/autocorrupt-vulns.txt"
+VULN_DB_FILE_LIMIT = 145000
+LOG_FINALIZER_WAIT = 2
+
+
+// ------------------------------ basic types ------------------------------
+
+is_shell = function(value)
+    return typeof(value).lower == "shell"
+end function
+
+
+is_ftp_shell = function(value)
+    return typeof(value).lower == "ftpshell"
+end function
+
+
+is_computer = function(value)
+    return typeof(value).lower == "computer"
+end function
+
+
+is_file = function(value)
+    return typeof(value).lower == "file"
+end function
+
+
+is_router = function(value)
+    return typeof(value).lower == "router"
+end function
+
+
+is_switch = function(value)
+    return typeof(value).lower == "switch"
+end function
+
+
+is_route_device = function(value)
+    return is_router(value) or is_switch(value)
+end function
+
+
+is_router_computer = function(computer)
+    if not is_computer(computer) then return false
+    return is_file(computer.File("/lib/kernel_router.so"))
+end function
+
+
+is_net_session = function(value)
+    return typeof(value).lower == "netsession"
+end function
+
+
+is_meta_lib = function(value)
+    return typeof(value).lower == "metalib"
+end function
+
+
+is_metaxploit = function(value)
+    return typeof(value).lower == "metaxploitlib"
+end function
+
+
+computer_from = function(value)
+    if is_shell(value) then return value.host_computer
+    if is_ftp_shell(value) then return value.host_computer
+    if is_computer(value) then return value
+    return null
+end function
+
+
+filesystem_root_from = function(value)
+    if is_shell(value) then return value.host_computer.File("/")
+    if is_ftp_shell(value) then return value.host_computer.File("/")
+    if is_computer(value) then return value.File("/")
+    if not is_file(value) then return null
+
+    root = value
+    while root.parent
+        root = root.parent
+    end while
+    return root
+end function
+
+
+passwd_file_from = function(value)
+    computer = computer_from(value)
+    if is_computer(computer) then return computer.File("/etc/passwd")
+
+    root = filesystem_root_from(value)
+    if not is_file(root) then return null
+    folders = root.get_folders
+    if typeof(folders).lower != "list" then return null
+    etc_folder = null
+    for folder in folders
+        if folder.name == "etc" then
+            etc_folder = folder
+            break
+        end if
+    end for
+    if not is_file(etc_folder) then return null
+    files = etc_folder.get_files
+    if typeof(files).lower != "list" then return null
+    for file in files
+        if file.name == "passwd" then return file
+    end for
+    return null
+end function
+
+
+has_root_access = function(computer)
+    if not is_computer(computer) then return false
+    root_home = computer.File("/root")
+    if not is_file(root_home) then return false
+    if not root_home.is_folder then return false
+    if not root_home.has_permission("r") then return false
+    if not root_home.has_permission("w") then return false
+    return root_home.has_permission("x")
+end function
+
+
+authority_user = function(computer)
+    if not is_computer(computer) then return "none"
+    if has_root_access(computer) then return "root"
+
+    home = computer.File("/home")
+    if not is_file(home) then return "guest"
+    folders = home.get_folders
+    if typeof(folders).lower != "list" then return "guest"
+    for folder in folders
+        if folder.name == "guest" then continue
+        if folder.has_permission("r") and folder.has_permission("w") and folder.has_permission("x") then
+            return folder.name
+        end if
+    end for
+    return "guest"
+end function
+
+
+authority_from_value = function(value)
+    computer = computer_from(value)
+    if is_computer(computer) then return authority_user(computer)
+
+    root = filesystem_root_from(value)
+    if not is_file(root) then return "none"
+    folders = root.get_folders
+    if typeof(folders).lower != "list" then return "guest"
+    home = null
+    for folder in folders
+        if folder.name == "root" then
+            if folder.has_permission("r") and folder.has_permission("w") and folder.has_permission("x") then return "root"
+        end if
+        if folder.name == "home" then home = folder
+    end for
+    if not is_file(home) then return "guest"
+    users = home.get_folders
+    if typeof(users).lower != "list" then return "guest"
+    for folder in users
+        if folder.name == "guest" then continue
+        if folder.has_permission("r") and folder.has_permission("w") and folder.has_permission("x") then return folder.name
+    end for
+    return "guest"
+end function
+
+
+is_exact_target = function(value, contract)
+    computer = computer_from(value)
+    if not is_computer(computer) then return false
+    if computer.public_ip != contract.public_ip then return false
+    return computer.local_ip == contract.local_ip
+end function
+
+
+is_same_host = function(value, expected_computer)
+    computer = computer_from(value)
+    if not is_computer(computer) then return false
+    if not is_computer(expected_computer) then return false
+    if computer.public_ip != expected_computer.public_ip then return false
+    return computer.local_ip == expected_computer.local_ip
+end function
+
+
+yes_no = function(value)
+    if value then return "yes"
+    return "no"
+end function
+
+
+debug_log_folder = function(computer)
+    if not is_computer(computer) then return null
+
+    root_folder = computer.File("/root")
+    if is_file(root_folder) and root_folder.is_folder then
+        if root_folder.has_permission("r") and root_folder.has_permission("w") and root_folder.has_permission("x") then
+            return root_folder
+        end if
+    end if
+
+    user_folder = computer.File("/home/" + active_user)
+    if is_file(user_folder) and user_folder.is_folder then
+        if user_folder.has_permission("r") and user_folder.has_permission("w") and user_folder.has_permission("x") then
+            return user_folder
+        end if
+    end if
+
+    home_folder = computer.File("/home")
+    if not is_file(home_folder) then return null
+    for folder in home_folder.get_folders
+        if folder.has_permission("r") and folder.has_permission("w") and folder.has_permission("x") then
+            return folder
+        end if
+    end for
+    return null
+end function
+
+
+open_debug_part = function()
+    if globals.debug_file_failed then return null
+    if not is_file(globals.debug_folder) then return null
+
+    globals.debug_part = globals.debug_part + 1
+    if globals.debug_part == 1 then
+        filename = DEBUG_FILE_PREFIX + "-" + globals.debug_run_id + ".txt"
+    else
+        filename = DEBUG_FILE_PREFIX + "-" + globals.debug_run_id + "-part" + globals.debug_part + ".txt"
+    end if
+
+    path = globals.debug_folder.path + "/" + filename
+    if is_file(globals.local_computer.File(path)) then
+        globals.debug_file_failed = true
+        print("Diagnostic file collision; terminal logging will continue.")
+        return null
+    end if
+
+    created = globals.local_computer.touch(globals.debug_folder.path, filename)
+    if created != 1 then
+        globals.debug_file_failed = true
+        print("Unable to create diagnostic file; terminal logging will continue.")
+        return null
+    end if
+
+    file = globals.local_computer.File(path)
+    if not is_file(file) then
+        globals.debug_file_failed = true
+        print("Unable to open diagnostic file; terminal logging will continue.")
+        return null
+    end if
+
+    header = "AutoCorrupt diagnostic log" + char(10) +
+        "version=" + SCRIPT_VERSION + char(10) +
+        "run=" + globals.debug_run_id + char(10) +
+        "part=" + globals.debug_part + char(10) +
+        "started=" + current_date + char(10) +
+        "execution_host=" + globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+    if globals.debug_part > 1 then header = header + char(10) + "continued_from_part=" + (globals.debug_part - 1)
+
+    if file.set_content(header) != 1 then
+        globals.debug_file_failed = true
+        print("Unable to initialize diagnostic file; terminal logging will continue.")
+        return null
+    end if
+
+    globals.debug_file = file
+    globals.debug_paths.push(path)
+    print("Diagnostic log: " + path)
+    return path
+end function
+
+
+init_debug_log = function()
+    if not DIAGNOSTIC_LOG then return null
+    globals.debug_folder = debug_log_folder(globals.local_computer)
+    if not is_file(globals.debug_folder) then
+        globals.debug_file_failed = true
+        print("No writable diagnostic folder; terminal logging will continue.")
+        return null
+    end if
+
+    attempts = 0
+    while attempts < 20
+        globals.debug_run_id = floor(rnd * 1000000)
+        candidate = globals.debug_folder.path + "/" + DEBUG_FILE_PREFIX + "-" + globals.debug_run_id + ".txt"
+        if not is_file(globals.local_computer.File(candidate)) then return open_debug_part
+        attempts = attempts + 1
+    end while
+
+    globals.debug_file_failed = true
+    print("Unable to choose a unique diagnostic filename; terminal logging will continue.")
+    return null
+end function
+
+
+flush_debug = function()
+    if globals.debug_file_failed then return
+    if not is_file(globals.debug_file) then return
+    if globals.debug_pending.len == 0 then return
+
+    content = globals.debug_file.get_content
+    if typeof(content).lower != "string" then
+        globals.debug_file_failed = true
+        print("Unable to read diagnostic file; terminal logging will continue.")
+        return
+    end if
+
+    block = globals.debug_pending.join(char(10))
+    if content.len + block.len + 1 > DEBUG_FILE_LIMIT then
+        if not open_debug_part then return
+        content = globals.debug_file.get_content
+        if typeof(content).lower != "string" then
+            globals.debug_file_failed = true
+            print("Unable to read rotated diagnostic file; terminal logging will continue.")
+            return
+        end if
+    end if
+
+    if globals.debug_file.set_content(content + char(10) + block) != 1 then
+        globals.debug_file_failed = true
+        print("Unable to write diagnostic file; terminal logging will continue.")
+        return
+    end if
+    globals.debug_pending = []
+end function
+
+
+append_debug = function(line)
+    if globals.debug_file_failed then return
+    if not is_file(globals.debug_file) then return
+    globals.debug_pending.push(line)
+    if globals.debug_pending.len >= DEBUG_FLUSH_LINES then flush_debug
+end function
+
+
+diag = function(message)
+    if not DIAGNOSTIC_LOG then return
+    globals.log_seq = globals.log_seq + 1
+    line = "[ACLOG " + globals.log_seq + "] " + message
+    print(line)
+    append_debug(line)
+end function
+
+
+diag_critical = function(message)
+    diag(message)
+    flush_debug
+end function
+
+
+diag_value = function(stage, value, contract = null)
+    if not DIAGNOSTIC_LOG then return
+    kind = typeof(value).lower
+    if kind == "shell" or kind == "ftpshell" or kind == "computer" then
+        computer = computer_from(value)
+        if not is_computer(computer) then
+            diag(stage + " | type=" + kind + " | computer=unavailable")
+            return
+        end if
+        exact = false
+        if contract then exact = is_exact_target(value, contract)
+        diag(stage + " | type=" + kind +
+            " | host=" + computer.public_ip + "/" + computer.local_ip +
+            " | exact=" + yes_no(exact) +
+            " | authority=" + authority_user(computer))
+        return
+    end if
+    if kind == "file" then
+        passwd = passwd_file_from(value)
+        diag(stage + " | type=file | path=" + value.path +
+            " | authority=" + authority_from_value(value) +
+            " | passwd_readable=" + yes_no(is_file(passwd) and passwd.has_permission("r")))
+        return
+    end if
+    if kind == "number" then
+        diag(stage + " | type=number | value=" + value)
+        return
+    end if
+    if kind == "string" then
+        text = value.replace(char(13), " ").replace(char(10), " ")
+        if text.len > 300 then text = text[:300] + "..."
+        diag(stage + " | type=string | text=" + text)
+        return
+    end if
+    diag(stage + " | type=" + kind)
+end function
+
+
+// ------------------------------ retained log finalizer ------------------------------
+
+log_finalizer_key = function(computer)
+    if not is_computer(computer) then return ""
+    return computer.public_ip + "/" + computer.local_ip
+end function
+
+
+folder_child = function(folder, name)
+    if not is_file(folder) then return null
+    children = folder.get_folders
+    if typeof(children).lower != "list" then return null
+    for child in children
+        if child.name == name then return child
+    end for
+    return null
+end function
+
+
+file_child = function(folder, name)
+    if not is_file(folder) then return null
+    children = folder.get_files
+    if typeof(children).lower != "list" then return null
+    for child in children
+        if child.name == name then return child
+    end for
+    return null
+end function
+
+
+scrub_source_from_root = function(root)
+    etc_folder = folder_child(root, "etc")
+    if is_file(etc_folder) then
+        source = file_child(etc_folder, "fstab")
+        if is_file(source) and source.has_permission("r") then return source
+        source = file_child(etc_folder, "xorg.conf")
+        if is_file(source) and source.has_permission("r") then return source
+        files = etc_folder.get_files
+        if typeof(files).lower == "list" then
+            for candidate in files
+                if candidate.is_binary then continue
+                if candidate.has_permission("r") then return candidate
+            end for
+        end if
+    end if
+    return null
+end function
+
+
+stage_log_finalizer = function(value, role = "route", contract = null)
+    computer = computer_from(value)
+    entries = globals.contract_log_finalizers
+    keys = globals.contract_log_finalizer_keys
+    if role == "rshell_server" then
+        entries = globals.run_log_finalizers
+        keys = globals.run_log_finalizer_keys
+    end if
+
+    key = ""
+    var_folder = null
+    log_file = null
+    root = filesystem_root_from(value)
+    if is_computer(computer) then
+        key = log_finalizer_key(computer)
+        // The process currently executing AutoCorrupt cannot clean the
+        // disconnect that happens after it returns.  Its parent owns it.
+        local_key = log_finalizer_key(globals.local_computer)
+        if key == local_key then
+            if not globals.log_finalizer_local_reported then
+                globals.log_finalizer_local_reported = true
+                diag("log finalizer delegated | host=" + key + " | role=execution")
+            end if
+            return false
+        end if
+        if keys.hasIndex(key) then return true
+        var_folder = computer.File("/var")
+        log_file = computer.File("/var/system.log")
+    else if is_file(root) then
+        // File-only exploit results carry no public/local identity, but a
+        // writable filesystem capability can still receive a direct scrub.
+        key = "file-object-" + entries.len
+        var_folder = folder_child(root, "var")
+        log_file = file_child(var_folder, "system.log")
+    else
+        return false
+    end if
+
+    if not is_file(var_folder) or not is_file(log_file) then
+        diag("log finalizer unavailable | host=" + key + " | role=" + role + " | reason=path")
+        metric_add("log_finalizer_unavailable")
+        return false
+    end if
+    if not var_folder.has_permission("w") or not log_file.has_permission("w") then
+        diag("log finalizer unavailable | host=" + key + " | role=" + role + " | reason=permission")
+        metric_add("log_finalizer_unavailable")
+        return false
+    end if
+
+    contract_index = "run"
+    if contract then contract_index = str(contract.index)
+    suffix = entries.len
+    filename = ""
+    for attempt in range(0, 11)
+        candidate = ".aclog-" + contract_index + "-" + suffix
+        existing = null
+        if is_computer(computer) then existing = computer.File("/var/" + candidate)
+        if not is_computer(computer) then existing = file_child(var_folder, candidate)
+        if not is_file(existing) then
+            filename = candidate
+            break
+        end if
+        suffix = suffix + 1
+    end for
+    if filename == "" then
+        diag("log finalizer unavailable | host=" + key + " | role=" + role + " | reason=name")
+        metric_add("log_finalizer_unavailable")
+        return false
+    end if
+
+    created = 0
+    if is_computer(computer) then
+        created = computer.touch("/var", filename)
+    else
+        scrub_source = scrub_source_from_root(root)
+        if is_file(scrub_source) then created = scrub_source.copy("/var", filename)
+    end if
+    if created != 1 then
+        diag("log finalizer unavailable | host=" + key + " | role=" + role + " | reason=create")
+        metric_add("log_finalizer_unavailable")
+        return false
+    end if
+    retained_file = null
+    if is_computer(computer) then retained_file = computer.File("/var/" + filename)
+    if not is_computer(computer) then retained_file = file_child(var_folder, filename)
+    if not is_file(retained_file) then
+        diag("log finalizer unavailable | host=" + key + " | role=" + role + " | reason=retain")
+        metric_add("log_finalizer_unavailable")
+        return false
+    end if
+    written = retained_file.set_content("AUTOCORRUPT_LOG_FINAL|invalid")
+    if written != 1 then
+        diag("log finalizer unavailable | host=" + key + " | role=" + role + " | reason=write")
+        metric_add("log_finalizer_unavailable")
+        return false
+    end if
+
+    entries.push({"key": key, "role": role, "file": retained_file})
+    keys[key] = 1
+    metric_add("log_finalizers_staged")
+    diag("log finalizer staged | host=" + key + " | role=" + role + " | order=" + entries.len)
+    return true
+end function
+
+
+finalize_log_entries = function(entries, scope)
+    summary = {"staged": 0, "completed": 0, "failed": 0}
+    if typeof(entries).lower != "list" then return summary
+    summary.staged = entries.len
+    if entries.len == 0 then
+        diag("log finalizer complete | scope=" + scope + " | staged=0")
+        return summary
+    end if
+
+    // All route functions have returned before this runs.  Give disconnect and
+    // reboot activity time to reach system.log, then replace from victim inward
+    // to the public edge.  A retained File.move is the last call on each host.
+    wait(LOG_FINALIZER_WAIT)
+    index = entries.len - 1
+    while index >= 0
+        entry = entries[index]
+        retained_file = entry.file
+        result = 0
+        if is_file(retained_file) then result = retained_file.move("/var", "system.log")
+        entry["file"] = null
+        retained_file = null
+        if result == 1 then
+            summary.completed = summary.completed + 1
+            diag("log finalizer promoted | host=" + entry.key + " | role=" + entry.role + " | scope=" + scope)
+        else
+            summary.failed = summary.failed + 1
+            diag("log finalizer failed | host=" + entry.key + " | role=" + entry.role + " | scope=" + scope + " | result=" + result)
+        end if
+        index = index - 1
+    end while
+    return summary
+end function
+
+
+finalize_contract_logs = function(contract)
+    summary = finalize_log_entries(globals.contract_log_finalizers, "contract-" + contract.index)
+    diag_critical("log finalizer summary | scope=contract-" + contract.index +
+        " | completed=" + summary.completed + "/" + summary.staged +
+        " | failed=" + summary.failed +
+        " | unavailable=" + metric_value("log_finalizer_unavailable"))
+    globals.contract_log_finalizers = []
+    globals.contract_log_finalizer_keys = {}
+end function
+
+
+finalize_run_logs = function()
+    globals.rshell_provider = null
+    globals.rshell_server_shell = null
+    summary = finalize_log_entries(globals.run_log_finalizers, "run")
+    diag_critical("log finalizer summary | scope=run" +
+        " | completed=" + summary.completed + "/" + summary.staged +
+        " | failed=" + summary.failed)
+    globals.run_log_finalizers = []
+    globals.run_log_finalizer_keys = {}
+end function
+
+
+add_unique_number = function(values, number)
+    if typeof(number) != "number" then return
+    if values.indexOf(number) == null then values.push(number)
+end function
+
+
+add_unique_string = function(values, text)
+    if typeof(text) != "string" then return
+    if values.indexOf(text) == null then values.push(text)
+end function
+
+
+// ------------------------------ MetaMail ------------------------------
+
+mail_text_from_value = function(value, mail_id, depth = 0)
+    if depth > 8 then return null
+    kind = typeof(value).lower
+    if kind == "string" then return value
+
+    if kind == "list" then
+        best = null
+        for item in value
+            text = mail_text_from_value(item, mail_id, depth + 1)
+            if typeof(text) != "string" then continue
+            if not best then
+                best = text
+            else if text.len > best.len then
+                best = text
+            end if
+        end for
+        return best
+    end if
+
+    if kind == "map" then
+        if value.hasIndex(mail_id) then return mail_text_from_value(value[mail_id], mail_id, depth + 1)
+        if value.hasIndex("content") then return mail_text_from_value(value["content"], mail_id, depth + 1)
+        if value.hasIndex("body") then return mail_text_from_value(value["body"], mail_id, depth + 1)
+        if value.hasIndex("message") then return mail_text_from_value(value["message"], mail_id, depth + 1)
+        if value.hasIndex("text") then return mail_text_from_value(value["text"], mail_id, depth + 1)
+
+        best = null
+        for item in value.values
+            text = mail_text_from_value(item, mail_id, depth + 1)
+            if typeof(text) != "string" then continue
+            if not best then
+                best = text
+            else if text.len > best.len then
+                best = text
+            end if
+        end for
+        return best
+    end if
+
+    return null
+end function
+
+
+mail_read_failed = function(value)
+    if typeof(value) != "string" then return true
+    text = value.trim
+    if text == "" then return true
+    lowered = text.lower
+    if lowered == "mail not found" then return true
+    if lowered.indexOf("no internet access") != null then return true
+    if lowered.indexOf("unknown error:") == 0 then return true
+    return false
+end function
+
+
+read_mail = function(mail_id)
+    scalar = globals.meta_mail.read(mail_id)
+    text = mail_text_from_value(scalar, mail_id)
+    if not mail_read_failed(text) then return text
+
+    batch = globals.meta_mail.read([mail_id])
+    text = mail_text_from_value(batch, mail_id)
+    if not mail_read_failed(text) then return text
+    return null
+end function
+
+
+header_field = function(header, labels)
+    if typeof(header) != "string" then return null
+    for raw_line in header.split(char(10))
+        line = raw_line.trim
+        for label in labels
+            prefix = label + ":"
+            if line.indexOf(prefix) == 0 then return line[prefix.len:].trim
+        end for
+    end for
+    return null
+end function
+
+
+parse_mail_header = function(header)
+    if typeof(header) != "string" then return null
+    mail_id = header_field(header, ["ID", "MailID", "Mail ID"])
+    subject = header_field(header, ["Subject"])
+    lines = header.split(char(10))
+
+    if not mail_id then
+        if lines.len > 2 then
+            pieces = lines[2].split(":")
+            if pieces.len > 1 then mail_id = pieces[1].trim
+        end if
+    end if
+
+    if not subject then
+        if lines.len > 4 then
+            pieces = lines[4].split(":")
+            if pieces.len > 1 then subject = pieces[1].trim
+        end if
+    end if
+
+    if not mail_id then return null
+    if not subject then return null
+    return {"id": mail_id, "subject": subject}
+end function
+
+
+strip_markup = function(text)
+    if typeof(text) != "string" then return ""
+    plain = text
+    while true
+        left = plain.indexOf("<")
+        if left == null then break
+        right = plain.indexOf(">", left)
+        if right == null then break
+        plain = plain[:left] + plain[right + 1:]
+    end while
+    return plain.replace(char(13), "")
+end function
+
+
+ipv4_octets = function(text)
+    if typeof(text) != "string" then return null
+    parts = text.split("[.]")
+    if parts.len != 4 then return null
+    octets = []
+    for part in parts
+        if part == "" then return null
+        number = part.to_int
+        if typeof(number) != "number" then return null
+        if number < 0 then return null
+        if number > 255 then return null
+        if str(number) != part then return null
+        octets.push(number)
+    end for
+    return octets
+end function
+
+
+is_private_ipv4 = function(text)
+    octets = ipv4_octets(text)
+    if not octets then return false
+    if octets[0] == 10 then return true
+    if octets[0] == 172 then
+        if octets[1] >= 16 then
+            if octets[1] <= 31 then return true
+        end if
+    end if
+    if octets[0] == 192 then
+        if octets[1] == 168 then return true
+    end if
+    return false
+end function
+
+
+trim_ip_token = function(value)
+    while value.len > 0
+        if value[0] != "." then break
+        value = value[1:]
+    end while
+    while value.len > 0
+        if value[-1] != "." then break
+        value = value[:-1]
+    end while
+    return value
+end function
+
+
+contract_addresses = function(text)
+    public_ip = null
+    local_ip = null
+    for raw_value in text.split("[^0-9.]+")
+        value = trim_ip_token(raw_value)
+        if not ipv4_octets(value) then continue
+        if is_private_ipv4(value) then
+            if not local_ip then local_ip = value
+        else
+            if not public_ip then public_ip = value
+        end if
+    end for
+    return [public_ip, local_ip]
+end function
+
+
+corrupt_wording_match = function(text)
+    if typeof(text) != "string" then return null
+    lowered = text.lower
+
+    // Stem match covers corrupt, corrupted, corrupting, and corruption.
+    if lowered.indexOf("corrupt") != null then return "corrupt_stem"
+    if lowered.indexOf("remote machine to stop working") != null then return "stop_working_phrase"
+    if lowered.indexOf("machine to stop working") != null then return "stop_working_phrase"
+    if lowered.indexOf("system files") != null then
+        if lowered.indexOf("cannot boot") != null then return "system_files_cannot_boot"
+        if lowered.indexOf("can't boot") != null then return "system_files_cannot_boot"
+    end if
+    return null
+end function
+
+
+parse_corrupt_contract = function(body, mail_id, display_index)
+    if typeof(body) != "string" then return null
+    plain = strip_markup(body)
+    wording_match = corrupt_wording_match(plain)
+    if not wording_match then return null
+
+    addresses = contract_addresses(plain)
+    public_ip = addresses[0]
+    local_ip = addresses[1]
+    if not public_ip then return null
+    if not local_ip then return null
+    if not ipv4_octets(public_ip) then return null
+    if not is_private_ipv4(local_ip) then return null
+
+    return {
+        "index": display_index,
+        "mail_id": mail_id,
+        "public_ip": public_ip,
+        "local_ip": local_ip,
+        "wording_match": wording_match}
+end function
+
+
+load_contracts = function()
+    contracts = []
+    summaries = globals.meta_mail.fetch
+    if typeof(summaries).lower != "list" then exit("MetaMail.fetch failed.")
+    diag("mail fetch | summaries=" + summaries.len)
+
+    for summary in summaries
+        if contracts.len >= MAX_MAILS then break
+        header = parse_mail_header(summary)
+        if not header then continue
+        if header.subject != "Mission Contract" then continue
+        body = read_mail(header.id)
+        if typeof(body) != "string" then
+            diag("mail mission skipped | id=" + header.id + " | reason=read_failed")
+            continue
+        end if
+
+        plain = strip_markup(body)
+        wording_match = corrupt_wording_match(plain)
+        if not wording_match then
+            diag("mail mission skipped | id=" + header.id + " | reason=not_corrupt_wording")
+            continue
+        end if
+
+        contract = parse_corrupt_contract(body, header.id, contracts.len)
+        if contract then
+            contracts.push(contract)
+            diag("mail contract | id=" + header.id +
+                " | victim=" + contract.public_ip + "/" + contract.local_ip +
+                " | wording=" + contract.wording_match)
+        else
+            diag("mail mission skipped | id=" + header.id +
+                " | reason=missing_or_invalid_target_addresses" +
+                " | wording=" + wording_match)
+        end if
+    end for
+    diag("mail load complete | corrupt_contracts=" + contracts.len)
+    return contracts
+end function
+
+
+print_contracts = function(contracts)
+    print("<size=125%><b>Corrupt contracts</b></size>")
+    for contract in contracts
+        print("[" + contract.index + "] " + contract.public_ip + " / " + contract.local_ip)
+    end for
+end function
+
+
+contract_signature = function(contracts)
+    values = []
+    for contract in contracts
+        values.push(contract.mail_id + "=" + contract.public_ip + "/" + contract.local_ip)
+    end for
+    return values.join("|")
+end function
+
+
+refresh_contracts = function(previous_contracts)
+    previous_signature = contract_signature(previous_contracts)
+    diag("mail refresh requested | previous_contracts=" + previous_contracts.len)
+
+    refreshed_mail = mail_login(globals.mail_user, globals.mail_password)
+    if typeof(refreshed_mail).lower != "metamail" then
+        print("MetaMail refresh login failed; keeping the current list.")
+        diag("mail refresh failed | stage=login")
+        return previous_contracts
+    end if
+
+    globals.meta_mail = refreshed_mail
+    refreshed_contracts = load_contracts
+    refreshed_signature = contract_signature(refreshed_contracts)
+    if refreshed_signature == previous_signature then
+        print("Refresh returned the same contract set.")
+        diag("mail refresh complete | changed=no | contracts=" + refreshed_contracts.len)
+    else
+        print("Mail contracts refreshed.")
+        diag("mail refresh complete | changed=yes | contracts=" + refreshed_contracts.len)
+    end if
+    return refreshed_contracts
+end function
+
+
+select_contracts = function(contracts)
+    while true
+        choice = user_input("Indexes separated by spaces (Enter or all = all; refresh = reload; q = quit): ").trim
+        if choice.lower == "refresh" or choice.lower == "r" then
+            contracts = refresh_contracts(contracts)
+            print_contracts(contracts)
+            continue
+        end if
+        if choice.lower == "q" or choice.lower == "quit" then return []
+        if choice == "" then return contracts
+        if choice.lower == "all" then return contracts
+
+        selected = []
+        indexes = []
+        for token in choice.split(" ")
+            token = token.trim
+            if token == "" then continue
+            index = token.to_int
+            if typeof(index) != "number" then continue
+            if index < 0 then continue
+            if index >= contracts.len then continue
+            if indexes.indexOf(index) != null then continue
+            indexes.push(index)
+            selected.push(contracts[index])
+        end for
+        return selected
+    end while
+end function
+
+
+// ------------------------------ exploit primitives ------------------------------
+
+metric_add = function(name, amount = 1)
+    if not globals.contract_metrics.hasIndex(name) then globals.contract_metrics[name] = 0
+    globals.contract_metrics[name] = globals.contract_metrics[name] + amount
+end function
+
+
+is_action_result = function(value)
+    kind = typeof(value).lower
+    if kind == "shell" then return true
+    if kind == "ftpshell" then return true
+    if kind == "computer" then return true
+    if kind == "file" then return true
+    return kind == "number"
+end function
+
+
+is_authority_result = function(value)
+    kind = typeof(value).lower
+    if kind == "shell" then return true
+    if kind == "ftpshell" then return true
+    if kind != "computer" then return false
+    authority = authority_user(value)
+    if authority == "guest" then return false
+    return authority != "none"
+end function
+
+
+db_field = function(value)
+    text = str(value)
+    return text.replace("[|]", "/").replace(char(13), " ").replace(char(10), " ")
+end function
+
+
+vuln_fingerprint = function(meta_lib)
+    return meta_lib.lib_name + "@" + meta_lib.version
+end function
+
+
+vuln_requirement_mode = function(requirement)
+    lowered = requirement.lower
+    if lowered.indexOf("password") != null then return "password"
+    if lowered.indexOf("lan ip") != null then return "lan"
+    if lowered.indexOf("local ip") != null then return "lan"
+    if lowered.indexOf("same subnet") != null then return "lan"
+    if lowered.indexOf("same network") != null then return "lan"
+    if lowered.indexOf("router membership") != null then return "lan"
+    if lowered.trim == "" then return "plain"
+    return "unknown"
+end function
+
+
+open_vuln_db = function()
+    file = globals.local_computer.File(VULN_DB_PATH)
+    if is_file(file) then return file
+
+    folder = globals.local_computer.File("/root")
+    if not is_file(folder) then folder = debug_log_folder(globals.local_computer)
+    if not is_file(folder) then return null
+    if not folder.has_permission("w") then return null
+    if not folder.has_permission("x") then return null
+
+    filename = "autocorrupt-vulns.txt"
+    created = globals.local_computer.touch(folder.path, filename)
+    if created != 1 then return null
+    return globals.local_computer.File(folder.path + "/" + filename)
+end function
+
+
+load_vuln_db = function()
+    globals.vuln_db = {}
+    globals.vuln_meta = {}
+    globals.vuln_scanned = {}
+    globals.vuln_dirty = false
+    globals.vuln_db_file = open_vuln_db
+    if not is_file(globals.vuln_db_file) then
+        diag("vuln db | unavailable; run cache is memory-only")
+        return
+    end if
+
+    content = globals.vuln_db_file.get_content
+    if typeof(content).lower != "string" then content = ""
+    loaded = 0
+    for line in content.split(char(10))
+        clean = line.replace(char(13), "").trim
+        if clean == "" then continue
+        parts = clean.split("[|]")
+        if parts.len < 3 then continue
+        if parts[0] == "S" then
+            fingerprint = parts[1] + "@" + parts[2]
+            globals.vuln_scanned[fingerprint] = 1
+            globals.vuln_meta[fingerprint] = [parts[1], parts[2]]
+            if not globals.vuln_db.hasIndex(fingerprint) then globals.vuln_db[fingerprint] = []
+            continue
+        end if
+        if parts[0] != "V" then continue
+        if parts.len < 12 then continue
+        fingerprint = parts[1] + "@" + parts[2]
+        if not globals.vuln_db.hasIndex(fingerprint) then globals.vuln_db[fingerprint] = []
+        globals.vuln_meta[fingerprint] = [parts[1], parts[2]]
+        globals.vuln_scanned[fingerprint] = 1
+        score = parts[7].to_int
+        hits = parts[8].to_int
+        attempts = parts[9].to_int
+        if typeof(score).lower != "number" then score = 0
+        if typeof(hits).lower != "number" then hits = 0
+        if typeof(attempts).lower != "number" then attempts = 0
+        globals.vuln_db[fingerprint].push({
+            "lib": parts[1],
+            "version": parts[2],
+            "region": parts[3],
+            "unsafe": parts[4],
+            "mode": parts[5],
+            "requirement": parts[6],
+            "score": score,
+            "hits": hits,
+            "attempts": attempts,
+            "last_kind": parts[10]})
+        loaded = loaded + 1
+    end for
+    diag("vuln db | path=" + globals.vuln_db_file.path + " | entries=" + loaded)
+end function
+
+
+save_vuln_db = function()
+    if not globals.vuln_dirty then return true
+    if not is_file(globals.vuln_db_file) then return false
+
+    lines = ["ACVDB1"]
+    for fingerprint in globals.vuln_meta.indexes
+        meta = globals.vuln_meta[fingerprint]
+        lines.push("S|" + db_field(meta[0]) + "|" + db_field(meta[1]))
+        if not globals.vuln_db.hasIndex(fingerprint) then continue
+        for entry in globals.vuln_db[fingerprint]
+            lines.push("V|" + db_field(entry.lib) +
+                "|" + db_field(entry.version) +
+                "|" + db_field(entry.region) +
+                "|" + db_field(entry.unsafe) +
+                "|" + db_field(entry.mode) +
+                "|" + db_field(entry.requirement) +
+                "|" + entry.score +
+                "|" + entry.hits +
+                "|" + entry.attempts +
+                "|" + db_field(entry.last_kind) +
+                "|-")
+        end for
+    end for
+    content = lines.join(char(10))
+    if content.len > VULN_DB_FILE_LIMIT then
+        diag("vuln db | save skipped; size limit exceeded")
+        return false
+    end if
+    if globals.vuln_db_file.set_content(content) != 1 then
+        diag("vuln db | save failed")
+        return false
+    end if
+    globals.vuln_dirty = false
+    metric_add("vuln_db_saves")
+    return true
+end function
+
+
+scan_vulnerability_entries = function(provider, meta_lib)
+    fingerprint = vuln_fingerprint(meta_lib)
+    if globals.vuln_scanned.hasIndex(fingerprint) then
+        metric_add("vuln_cache_hits")
+        return globals.vuln_db[fingerprint]
+    end if
+
+    metric_add("vuln_cache_misses")
+    entries = []
+    regions = provider.scan(meta_lib)
+    if typeof(regions).lower != "list" then
+        diag("vuln scan | library=" + fingerprint + " | scan failed; not cached")
+        return entries
+    end if
+    for region in regions
+        scan_text = provider.scan_address(meta_lib, region)
+        if typeof(scan_text).lower != "string" then continue
+        pieces = scan_text.split("Unsafe check: ")
+        if pieces.len < 2 then continue
+        for piece in pieces[1:]
+            start = piece.indexOf("<b>")
+            finish = piece.indexOf("</b>")
+            if start == null then continue
+            if finish == null then continue
+            if finish <= start + 3 then continue
+            unsafe_value = piece[start + 3:finish].replace(char(10), "").trim
+            if unsafe_value == "" then continue
+            duplicate = false
+            for known in entries
+                if known.region == region and known.unsafe == unsafe_value then duplicate = true
+            end for
+            if duplicate then continue
+            requirement = strip_markup(piece[finish + 4:]).replace(char(10), " ").trim
+            while requirement.indexOf("  ") != null
+                requirement = requirement.replace("  ", " ")
+            end while
+            entries.push({
+                "lib": meta_lib.lib_name,
+                "version": str(meta_lib.version),
+                "region": region,
+                "unsafe": unsafe_value,
+                "mode": vuln_requirement_mode(requirement),
+                "requirement": requirement,
+                "score": 0,
+                "hits": 0,
+                "attempts": 0,
+                "last_kind": "untried"})
+        end for
+    end for
+
+    globals.vuln_db[fingerprint] = entries
+    globals.vuln_meta[fingerprint] = [meta_lib.lib_name, str(meta_lib.version)]
+    globals.vuln_scanned[fingerprint] = 1
+    globals.vuln_dirty = true
+    diag("vuln scan | library=" + fingerprint + " | entries=" + entries.len + " | cached=no")
+    save_vuln_db
+    return entries
+end function
+
+
+ordered_vulnerabilities = function(entries)
+    ordered = []
+    for entry in entries
+        if entry.score >= 90 then ordered.push(entry)
+    end for
+    for entry in entries
+        if entry.score >= 70 and entry.score < 90 then ordered.push(entry)
+    end for
+    for entry in entries
+        if entry.score >= 50 and entry.score < 70 then ordered.push(entry)
+    end for
+    for entry in entries
+        if entry.score > 0 and entry.score < 50 then ordered.push(entry)
+    end for
+    for entry in entries
+        if entry.score <= 0 then ordered.push(entry)
+    end for
+    return ordered
+end function
+
+
+requirement_ready = function(entry, session)
+    if not is_net_session(session) then return true
+    lowered = entry.requirement.lower
+    needs_root = lowered.indexOf("root active") != null or lowered.indexOf("active root") != null
+    if lowered.indexOf("root user") != null and lowered.indexOf("active") != null then needs_root = true
+    if needs_root and not session.is_root_active_user then return false
+    needs_user = lowered.indexOf("active user") != null
+    if needs_user and not session.is_any_active_user then return false
+    return true
+end function
+
+
+overflow_arguments = function(entry, inject, try_plain, contract, secondary_inject)
+    arguments = []
+    if entry.mode == "password" then
+        arguments.push(CREDENTIAL_INJECT)
+        return arguments
+    end if
+    if entry.mode == "lan" then
+        lan_ip = inject
+        if contract then lan_ip = contract.local_ip
+        if lan_ip != "" then arguments.push(lan_ip)
+        return arguments
+    end if
+    if entry.mode == "plain" then return ["__AC_PLAIN__"]
+
+    // Unknown requirement text keeps a bounded compatibility fallback.  Once
+    // an outcome is learned it is tried first on the next matching version.
+    if inject != "" then add_unique_string(arguments, inject)
+    if secondary_inject != "" then add_unique_string(arguments, secondary_inject)
+    if try_plain or inject == "" then add_unique_string(arguments, "__AC_PLAIN__")
+    return arguments
+end function
+
+
+record_vuln_result = function(entry, result)
+    entry.attempts = entry.attempts + 1
+    kind = typeof(result).lower
+    entry.last_kind = kind
+    score = 0
+    if is_action_result(result) then entry.hits = entry.hits + 1
+    computer = computer_from(result)
+    authority = authority_from_value(result)
+    if is_computer(computer) and has_root_access(computer) then
+        score = 100
+    else if authority == "root" then
+        score = 95
+    else if authority != "none" and authority != "guest" then
+        score = 70
+    else if kind == "shell" or kind == "ftpshell" then
+        score = 50
+    else if kind == "computer" then
+        score = 30
+    else if kind == "file" then
+        passwd = passwd_file_from(result)
+        if is_file(passwd) then
+            if passwd.has_permission("r") then score = 40 else score = 20
+        else
+            score = 20
+        end if
+    else if kind == "number" then
+        score = 10
+    end if
+    if score > entry.score then entry.score = score
+    globals.vuln_dirty = true
+end function
+
+
+scan_and_fire = function(provider, meta_lib, inject = "", try_plain = false, contract = null, secondary_inject = "", session = null)
+    results = []
+    if not is_metaxploit(provider) then return results
+    if not is_meta_lib(meta_lib) then return results
+    fingerprint = vuln_fingerprint(meta_lib)
+    entries = scan_vulnerability_entries(provider, meta_lib)
+    if globals.vuln_scanned.hasIndex(fingerprint) then
+        diag("vuln use | library=" + fingerprint + " | entries=" + entries.len)
+    end if
+
+    for entry in ordered_vulnerabilities(entries)
+        if not requirement_ready(entry, session) then
+            metric_add("vuln_state_skips")
+            continue
+        end if
+        stop_arguments = false
+        for argument in overflow_arguments(entry, inject, try_plain, contract, secondary_inject)
+            metric_add("overflow_attempts")
+            if argument == "__AC_PLAIN__" then
+                result = meta_lib.overflow(entry.region, entry.unsafe)
+            else
+                result = meta_lib.overflow(entry.region, entry.unsafe, argument)
+            end if
+            record_vuln_result(entry, result)
+            if result == null then continue
+            diag_value("overflow cached " + entry.region + " mode=" + entry.mode, result, contract)
+            if not is_action_result(result) then continue
+            learned_kind = typeof(result).lower
+            learn_call_shape = learned_kind == "shell" or learned_kind == "ftpshell" or learned_kind == "computer" or learned_kind == "file"
+            if entry.mode == "unknown" and learn_call_shape then
+                if argument == "__AC_PLAIN__" then
+                    entry.mode = "plain"
+                else if argument == CREDENTIAL_INJECT then
+                    entry.mode = "password"
+                else if contract then
+                    if argument == contract.local_ip then entry.mode = "lan"
+                end if
+                globals.vuln_dirty = true
+            end if
+            results.push(result)
+            role = "route"
+            if contract then
+                if is_exact_target(result, contract) then role = "target"
+            end if
+            stage_log_finalizer(result, role, contract)
+            if contract then capture_root_password(result, contract)
+            if contract then
+                if is_exact_target(result, contract) then
+                    if has_root_access(computer_from(result)) then return [result]
+                end if
+            end if
+            kind = typeof(result).lower
+            authority = authority_from_value(result)
+            // A shell is the next route stage, so stop spraying this library
+            // and spend the remaining hardware budget on that new host.
+            if kind == "shell" then return results
+            if kind == "ftpshell" then stop_arguments = true
+            if authority != "none" and authority != "guest" then stop_arguments = true
+            if stop_arguments then break
+        end for
+    end for
+    return results
+end function
+
+
+service_protocol = function(meta_lib)
+    if not is_meta_lib(meta_lib) then return null
+    name = meta_lib.lib_name.lower
+    if name.indexOf("ssh") != null then return "ssh"
+    if name.indexOf("ftp") != null then return "ftp"
+    return null
+end function
+
+
+add_computer_users = function(users, computer)
+    if not is_computer(computer) then return
+    home = computer.File("/home")
+    if is_file(home) then
+        folders = home.get_folders
+        if typeof(folders).lower == "list" then
+            for folder in folders
+                if users.len >= 12 then return
+                add_unique_string(users, folder.name)
+            end for
+        end if
+    end if
+
+    passwd = computer.File("/etc/passwd")
+    if not is_file(passwd) then return
+    if not passwd.has_permission("r") then return
+    content = passwd.get_content
+    if typeof(content).lower != "string" then return
+    for line in content.split(char(10))
+        if users.len >= 12 then return
+        fields = line.split(":")
+        if fields.len < 2 then continue
+        username = fields[0].trim
+        if username == "" then continue
+        add_unique_string(users, username)
+    end for
+end function
+
+
+root_password_for = function(computer)
+    if not is_computer(computer) then return null
+    host_key = computer.public_ip + "/" + computer.local_ip
+    if globals.root_passwords.hasIndex(host_key) then return globals.root_passwords[host_key]
+    if globals.network_root_passwords.hasIndex(computer.public_ip) then return globals.network_root_passwords[computer.public_ip]
+    return null
+end function
+
+
+capture_root_password = function(value, contract = null)
+    computer = computer_from(value)
+    if is_computer(computer) then
+        host_key = computer.public_ip + "/" + computer.local_ip
+        network_key = computer.public_ip
+        if globals.root_passwords.hasIndex(host_key) then return globals.root_passwords[host_key]
+    else
+        if not contract then return null
+        host_key = "network/" + contract.public_ip
+        network_key = contract.public_ip
+        if globals.network_root_passwords.hasIndex(network_key) then return globals.network_root_passwords[network_key]
+    end if
+    if globals.root_password_attempted.hasIndex(host_key) then
+        if globals.network_root_passwords.hasIndex(network_key) then return globals.network_root_passwords[network_key]
+        return null
+    end if
+
+    if not globals.crypto then return null
+    passwd = passwd_file_from(value)
+    if not is_file(passwd) then
+        if not globals.root_passwd_unreadable.hasIndex(host_key) then
+            globals.root_passwd_unreadable[host_key] = 1
+            metric_add("root_passwd_unreadable")
+            diag("root credential | host=" + host_key + " | passwd=unreadable")
+        end if
+        if globals.network_root_passwords.hasIndex(network_key) then return globals.network_root_passwords[network_key]
+        return null
+    end if
+    if not passwd.has_permission("r") then
+        if not globals.root_passwd_unreadable.hasIndex(host_key) then
+            globals.root_passwd_unreadable[host_key] = 1
+            metric_add("root_passwd_unreadable")
+            diag("root credential | host=" + host_key + " | passwd=unreadable")
+        end if
+        if globals.network_root_passwords.hasIndex(network_key) then return globals.network_root_passwords[network_key]
+        return null
+    end if
+    content = passwd.get_content
+    if typeof(content).lower != "string" then return null
+
+    root_hash = ""
+    for line in content.split(char(10))
+        fields = line.trim.split(":")
+        if fields.len < 2 then continue
+        if fields[0] != "root" then continue
+        root_hash = fields[1].trim
+        break
+    end for
+    if root_hash == "" then return null
+
+    // Cache only a real decipher attempt.  A guest permission failure must not
+    // prevent a later named-user object from retrying this same host.
+    globals.root_password_attempted[host_key] = 1
+    metric_add("root_decipher_attempts")
+    password = globals.crypto.decipher(root_hash)
+    if typeof(password).lower != "string" then
+        diag("root credential | host=" + host_key + " | decipher=miss")
+        return null
+    end if
+    if password == "" then
+        diag("root credential | host=" + host_key + " | decipher=miss")
+        return null
+    end if
+
+    globals.root_passwords[host_key] = password
+    globals.network_root_passwords[network_key] = password
+    metric_add("root_decipher_successes")
+    diag("root credential | host=" + host_key + " | network=" + network_key + " | decipher=success")
+    return password
+end function
+
+
+decipher_root_password = function(computer)
+    if not is_computer(computer) then return null
+    return capture_root_password(computer)
+end function
+
+
+connect_injected_service = function(connection_shell, ip, port, meta_lib, results, any_active = false, root_active = false, contract = null)
+    if not is_shell(connection_shell) then return null
+    protocol = service_protocol(meta_lib)
+    if not protocol then return null
+
+    password_changed = false
+    users = ["root"]
+    for result in results
+        if typeof(result).lower == "number" then password_changed = true
+        add_computer_users(users, computer_from(result))
+    end for
+    if not password_changed then return null
+
+    // A numeric return cannot represent a usable password change when the
+    // service itself reports that no account is active.  Do not spend hardware
+    // and time attempting credentials that cannot be accepted.
+    if not any_active and not root_active then
+        diag("password reconnect skipped | endpoint=" + ip + ":" + port +
+            " | reason=no_active_user")
+        return null
+    end if
+
+    if root_active then
+        users = ["root"]
+    else
+        add_unique_string(users, "guest")
+    end if
+
+    diag("password change observed | endpoint=" + ip + ":" + port +
+        " | protocol=" + protocol + " | reconnect_users=" + users.len)
+    for user in users
+        metric_add("reconnect_attempts")
+        connected = connection_shell.connect_service(ip, port, user, CREDENTIAL_INJECT, protocol)
+        if is_shell(connected) or is_ftp_shell(connected) then
+            diag_value("password reconnect user=" + user, connected, contract)
+            return connected
+        end if
+    end for
+    diag("password reconnect exhausted | endpoint=" + ip + ":" + port)
+    return null
+end function
+
+
+connect_deciphered_root = function(connection_shell, ip, port, meta_lib, results, contract = null)
+    if not is_shell(connection_shell) then return null
+    protocol = service_protocol(meta_lib)
+    if not protocol then return null
+    attempted_passwords = []
+
+    for result in results
+        computer = computer_from(result)
+        if is_computer(computer) then
+            if has_root_access(computer) then continue
+        end if
+        password = capture_root_password(result, contract)
+        if typeof(password).lower != "string" then continue
+        if attempted_passwords.indexOf(password) != null then continue
+        attempted_passwords.push(password)
+
+        metric_add("reconnect_attempts")
+        connected = connection_shell.connect_service(ip, port, "root", password, protocol)
+        if is_shell(connected) or is_ftp_shell(connected) then
+            connected_computer = computer_from(connected)
+            same_expected_host = true
+            if is_computer(computer) then same_expected_host = is_same_host(connected, computer)
+            if same_expected_host and has_root_access(connected_computer) then
+                diag_value("deciphered root reconnect", connected, contract)
+                return connected
+            end if
+        end if
+        diag("deciphered root reconnect failed | endpoint=" + ip + ":" + port)
+    end for
+    return null
+end function
+
+
+endpoint_origin_key = function(connection_shell)
+    computer = computer_from(connection_shell)
+    if not is_computer(computer) then computer = globals.local_computer
+    return computer.public_ip + "/" + computer.local_ip
+end function
+
+
+attack_endpoint = function(provider, ip, port, inject = "", try_plain = false, contract = null, secondary_inject = "", connection_shell = null)
+    results = []
+    if not is_metaxploit(provider) then
+        diag("endpoint " + ip + ":" + port + " | provider unavailable")
+        return results
+    end if
+
+    attempt_key = endpoint_origin_key(connection_shell) + "->" + ip + ":" + port +
+        "|" + inject + "|" + secondary_inject + "|" + yes_no(try_plain)
+    if globals.attempted_endpoints.hasIndex(attempt_key) then
+        metric_add("endpoint_duplicates_skipped")
+        return results
+    end if
+    globals.attempted_endpoints[attempt_key] = 1
+    metric_add("endpoint_attempts")
+
+    diag("endpoint " + ip + ":" + port +
+        " | primary=" + yes_no(inject != "") +
+        " | secondary=" + yes_no(secondary_inject != "") +
+        " | plain=" + yes_no(try_plain or inject == ""))
+
+    if port == 0 then
+        session = provider.net_use(ip)
+    else
+        session = provider.net_use(ip, port)
+    end if
+
+    if not is_net_session(session) then
+        diag("endpoint " + ip + ":" + port + " | no NetSession")
+        metric_add("log_unbound_endpoints")
+        diag("log finalizer unbound | endpoint=" + ip + ":" + port + " | reason=no_session")
+        return results
+    end if
+    meta_lib = session.dump_lib
+    if not is_meta_lib(meta_lib) then
+        diag("endpoint " + ip + ":" + port + " | dump_lib failed")
+        metric_add("log_unbound_endpoints")
+        diag("log finalizer unbound | endpoint=" + ip + ":" + port + " | reason=no_library")
+        return results
+    end if
+    // A remote provider establishes the route and returns the remote MetaLib.
+    // Scan that exported MetaLib with the local provider so exploit analysis
+    // uses the execution server's hardware instead of the weak jump host.
+    diag("endpoint session | endpoint=" + ip + ":" + port +
+        " | library=" + meta_lib.lib_name +
+        " | any_active=" + yes_no(session.is_any_active_user) +
+        " | root_active=" + yes_no(session.is_root_active_user) +
+        " | users=" + session.get_num_users +
+        " | forwards=" + session.get_num_portforward +
+        " | gateways=" + session.get_num_conn_gateway)
+
+    // Root credentials recovered anywhere on an NPC network are tested before
+    // another scan.  The returned computer must still prove root authority;
+    // a bad shared-password assumption simply falls through to exploitation.
+    protocol = service_protocol(meta_lib)
+    if protocol and contract and is_shell(connection_shell) then
+        if globals.network_root_passwords.hasIndex(contract.public_ip) then
+            metric_add("reconnect_attempts")
+            known_root = connection_shell.connect_service(
+                ip,
+                port,
+                "root",
+                globals.network_root_passwords[contract.public_ip],
+                protocol)
+            if is_shell(known_root) or is_ftp_shell(known_root) then
+                if has_root_access(computer_from(known_root)) then
+                    metric_add("network_root_reuses")
+                    diag_value("known network root reconnect", known_root, contract)
+                    role = "route"
+                    if is_exact_target(known_root, contract) then role = "target"
+                    stage_log_finalizer(known_root, role, contract)
+                    return [known_root]
+                end if
+            end if
+        end if
+    end if
+    results = scan_and_fire(globals.metaxploit, meta_lib, inject, try_plain, contract, secondary_inject, session)
+    connected = connect_deciphered_root(connection_shell, ip, port, meta_lib, results, contract)
+    if not connected then
+        connected = connect_injected_service(connection_shell, ip, port, meta_lib, results, session.is_any_active_user, session.is_root_active_user, contract)
+    end if
+    if connected then
+        results.push(connected)
+        role = "route"
+        if contract then
+            if is_exact_target(connected, contract) then role = "target"
+        end if
+        stage_log_finalizer(connected, role, contract)
+    end if
+    if results.len == 0 then
+        metric_add("log_unbound_endpoints")
+        diag("log finalizer unbound | endpoint=" + ip + ":" + port + " | reason=no_access_object")
+    end if
+    return results
+end function
+
+
+route_ports = function(router, contract)
+    direct = []
+    external = []
+    internal = []
+    if not is_route_device(router) then return {"direct": direct, "external": external, "internal": internal}
+
+    used = router.used_ports
+    if typeof(used).lower == "list" then
+        for port_object in used
+            if typeof(port_object).lower != "port" then continue
+            if port_object.get_lan_ip == contract.local_ip then
+                add_unique_number(direct, port_object.port_number)
+            else
+                add_unique_number(external, port_object.port_number)
+            end if
+        end for
+    end if
+
+    inside = router.device_ports(contract.local_ip)
+    if typeof(inside).lower == "list" then
+        for port_object in inside
+            if typeof(port_object).lower != "port" then continue
+            add_unique_number(internal, port_object.port_number)
+        end for
+    end if
+
+    if internal.len == 0 then internal = [80, 22, 21, 3306]
+    return {"direct": direct, "external": external, "internal": internal}
+end function
+
+
+// ------------------------------ remote provider / rshell ------------------------------
+
+writable_folder = function(computer)
+    if not is_computer(computer) then return null
+    candidates = []
+    root_home = computer.File("/root")
+    if is_file(root_home) then candidates.push(root_home)
+
+    home = computer.File("/home")
+    if is_file(home) then
+        folders = home.get_folders
+        if typeof(folders).lower == "list" then
+            for folder in folders
+                candidates.push(folder)
+            end for
+        end if
+    end if
+
+    for folder in candidates
+        if not folder.is_folder then continue
+        if not folder.has_permission("w") then continue
+        if not folder.has_permission("x") then continue
+        return folder
+    end for
+    return null
+end function
+
+
+import_remote_context = function(remote_shell, target_local_ip = "", root_password = "")
+    context = {"provider": null, "ports": [], "router_ip": "", "child_routers": [], "root_shell": null}
+    if not is_shell(remote_shell) then return context
+    computer = remote_shell.host_computer
+    if not is_computer(computer) then return context
+    work = writable_folder(computer)
+    if not is_file(work) then return context
+
+    remote_lib_path = work.path + "/metaxploit.so"
+    remote_lib = computer.File(remote_lib_path)
+    if not is_file(remote_lib) then
+        globals.local_shell.scp("/lib/metaxploit.so", work.path, remote_shell)
+        remote_lib = computer.File(remote_lib_path)
+    end if
+    if not is_file(remote_lib) then return context
+
+    source_path = work.path + "/acjump.src"
+    source_file = computer.File(source_path)
+    if not is_file(source_file) then
+        created = computer.touch(work.path, "acjump.src")
+        if created != 1 then return context
+        source_file = computer.File(source_path)
+    end if
+    if not is_file(source_file) then return context
+
+    source = "interop = get_custom_object()" + char(10) +
+        "interop.ac_provider = include_lib(params[0])" + char(10) +
+        "interop.ac_ports = []" + char(10) +
+        "interop.ac_router_ip = """"" + char(10) +
+        "interop.ac_child_routers = []" + char(10) +
+        "interop.ac_root_shell = null" + char(10) +
+        "if params.len > 1 then" + char(10) +
+        "    router = get_router" + char(10) +
+        "    if not router then router = get_switch" + char(10) +
+        "    if router then" + char(10) +
+        "        interop.ac_router_ip = router.local_ip" + char(10) +
+        "        target_ports = router.device_ports(params[1])" + char(10) +
+        "        if typeof(target_ports).lower == ""list"" then" + char(10) +
+        "            for target_port in target_ports" + char(10) +
+        "                if typeof(target_port).lower == ""port"" then interop.ac_ports.push(target_port.port_number)" + char(10) +
+        "            end for" + char(10) +
+        "        end if" + char(10) +
+        "        devices = router.devices_lan_ip" + char(10) +
+        "        if typeof(devices).lower == ""list"" then" + char(10) +
+        "            for device_ip in devices" + char(10) +
+        "                child = get_router(device_ip)" + char(10) +
+        "                if not child then child = get_switch(device_ip)" + char(10) +
+        "                if typeof(child).lower == ""router"" or typeof(child).lower == ""switch"" then interop.ac_child_routers.push(device_ip)" + char(10) +
+        "            end for" + char(10) +
+        "        end if" + char(10) +
+        "    end if" + char(10) +
+        "end if" + char(10) +
+        "if params.len > 2 then interop.ac_root_shell = get_shell(""root"", params[2])" + char(10)
+    if source_file.set_content(source) != 1 then return context
+
+    build_result = remote_shell.build(source_path, work.path, false)
+    if typeof(build_result).lower == "string" then
+        if build_result.len > 0 then return context
+    end if
+    if typeof(build_result).lower == "list" then
+        if build_result.len > 0 then return context
+    end if
+
+    bridge = get_custom_object
+    bridge.ac_provider = null
+    bridge.ac_ports = []
+    bridge.ac_router_ip = ""
+    bridge.ac_child_routers = []
+    bridge.ac_root_shell = null
+    launch_params = remote_lib_path
+    if target_local_ip != "" then launch_params = launch_params + " " + target_local_ip
+    if root_password != "" then launch_params = launch_params + " " + root_password
+    remote_shell.launch(work.path + "/acjump", launch_params)
+    provider = bridge.ac_provider
+    remote_ports = bridge.ac_ports
+    router_ip = bridge.ac_router_ip
+    child_routers = bridge.ac_child_routers
+    root_shell = bridge.ac_root_shell
+    bridge.ac_provider = null
+    bridge.ac_ports = []
+    bridge.ac_router_ip = ""
+    bridge.ac_child_routers = []
+    bridge.ac_root_shell = null
+    if is_shell(root_shell) then
+        if is_same_host(root_shell, computer) and has_root_access(root_shell.host_computer) then
+            context.root_shell = root_shell
+        end if
+    end if
+    if not is_metaxploit(provider) then return context
+
+    context.provider = provider
+    if typeof(remote_ports).lower == "list" then context.ports = remote_ports
+    if typeof(router_ip).lower == "string" then context.router_ip = router_ip
+    if typeof(child_routers).lower == "list" then context.child_routers = child_routers
+    return context
+end function
+
+
+rshell_listener_provider = function()
+    if is_metaxploit(globals.rshell_provider) then return globals.rshell_provider
+
+    server_shell = globals.local_shell.connect_service(
+        RSHELL_SERVER_IP,
+        RSHELL_SERVER_SSH_PORT,
+        RSHELL_SERVER_SSH_USER,
+        RSHELL_SERVER_SSH_PASSWORD,
+        "ssh")
+    if not is_shell(server_shell) then
+        diag("rshell listener | SSH connection failed")
+        return null
+    end if
+
+    remote_context = import_remote_context(server_shell)
+    provider = remote_context.provider
+    if not is_metaxploit(provider) then
+        diag("rshell listener | provider import failed")
+        return null
+    end if
+    globals.rshell_server_shell = server_shell
+    globals.rshell_provider = provider
+    stage_log_finalizer(server_shell, "rshell_server")
+    diag("rshell listener | ready at " + RSHELL_SERVER_IP + ":" + RSHELL_SERVER_PORT)
+    return provider
+end function
+
+
+request_rshell = function(remote_provider, contract)
+    if not is_metaxploit(remote_provider) then return null
+    receiver = rshell_listener_provider
+    if not is_metaxploit(receiver) then return null
+
+    shells = receiver.rshell_server()
+    if typeof(shells).lower != "list" then return null
+    for shell in shells
+        if is_shell(shell) then
+            if is_exact_target(shell, contract) then return shell
+        end if
+    end for
+
+    remote_provider.rshell_client(RSHELL_SERVER_IP, RSHELL_SERVER_PORT, RSHELL_PROCESS)
+    for attempt in range(0, 19)
+        wait(0.25)
+        shells = receiver.rshell_server()
+        if typeof(shells).lower != "list" then continue
+        for shell in shells
+            if not is_shell(shell) then continue
+            if is_exact_target(shell, contract) then return shell
+        end for
+    end for
+    return null
+end function
+
+
+find_exact_rshell = function(contract)
+    receiver = rshell_listener_provider
+    if not is_metaxploit(receiver) then return null
+    shells = receiver.rshell_server()
+    if typeof(shells).lower != "list" then
+        diag("rshell listener | no shell list")
+        return null
+    end if
+    diag("rshell listener | connected=" + shells.len)
+    for shell in shells
+        if not is_shell(shell) then continue
+        if is_exact_target(shell, contract) then return shell
+    end for
+    return null
+end function
+
+
+escalate_host_libraries = function(remote_provider, target_computer, host_shell = null, contract = null)
+    if not is_metaxploit(remote_provider) then return null
+    if not is_computer(target_computer) then return null
+    lib_folder = target_computer.File("/lib")
+    if not is_file(lib_folder) then return null
+    libraries = lib_folder.get_files
+    if typeof(libraries).lower != "list" then return null
+
+    ordered_paths = []
+    for preferred in ["init.so", "kernel_module.so", "net.so"]
+        for library in libraries
+            if library.name == preferred then add_unique_string(ordered_paths, library.path)
+        end for
+    end for
+    for library in libraries
+        if library.name.indexOf(".so") == null then continue
+        add_unique_string(ordered_paths, library.path)
+    end for
+
+    for library_path in ordered_paths
+        meta_lib = remote_provider.load(library_path)
+        if not is_meta_lib(meta_lib) then continue
+        for result in scan_and_fire(globals.metaxploit, meta_lib, CREDENTIAL_INJECT, true, contract)
+            // A File has no host identity field, but this library was loaded
+            // from target_computer.  It is safe to use it for credentials; it
+            // is never accepted as destructive target proof.
+            if not is_file(result) then
+                if not is_same_host(result, target_computer) then continue
+            end if
+            computer = computer_from(result)
+            if has_root_access(computer) then return result
+
+            // A named-user result is the bridge the guest shell was missing:
+            // read passwd with that authority, decipher root, then create the
+            // root shell locally on the captured host through acjump.
+            authority = authority_from_value(result)
+            if authority == "guest" or authority == "none" then continue
+            password = capture_root_password(result, contract)
+            if typeof(password).lower != "string" then continue
+            launch_shell = host_shell
+            if is_shell(result) then launch_shell = result
+            if not is_shell(launch_shell) then continue
+            context = import_remote_context(launch_shell, target_computer.local_ip, password)
+            if is_shell(context.root_shell) then
+                metric_add("root_shell_escalations")
+                diag_value("rehack credential escalation", context.root_shell, contract)
+                return context.root_shell
+            end if
+        end for
+    end for
+    return null
+end function
+
+
+stage_poison_http = function(remote_shell)
+    if not is_shell(remote_shell) then return null
+    local_poison = globals.local_computer.File(POISON_HTTP_SOURCE)
+    if not is_file(local_poison) then return null
+    if not local_poison.has_permission("r") then return null
+
+    shell_computer = remote_shell.host_computer
+    work = writable_folder(shell_computer)
+    if not is_file(work) then return null
+
+    staged_path = work.path + "/libhttp.so"
+    staged = shell_computer.File(staged_path)
+    if is_file(staged) then staged.delete
+    globals.local_shell.scp(POISON_HTTP_SOURCE, work.path, remote_shell)
+    staged = shell_computer.File(staged_path)
+    if not is_file(staged) then return null
+    return staged_path
+end function
+
+
+poison_host_http = function(remote_provider, admin_value, staged_path)
+    if not is_metaxploit(remote_provider) then return null
+    if typeof(staged_path) != "string" then return null
+    admin_computer = computer_from(admin_value)
+    if not is_computer(admin_computer) then return null
+    if not has_root_access(admin_computer) then return null
+    diag("PoisonLib install | host=" + admin_computer.public_ip + "/" + admin_computer.local_ip)
+
+    staged = admin_computer.File(staged_path)
+    if not is_file(staged) then return null
+    work_path = staged.parent.path
+
+    original = admin_computer.File("/lib/http.so")
+    backup_path = work_path + "/ac_http_original.so"
+    stale_backup = admin_computer.File(backup_path)
+    if is_file(stale_backup) then stale_backup.delete
+
+    backup = null
+    if is_file(original) then
+        original.copy(work_path, "ac_http_original.so")
+        backup = admin_computer.File(backup_path)
+        if not is_file(backup) then return null
+        original.delete
+        if is_file(admin_computer.File("/lib/http.so")) then return null
+    end if
+
+    staged.copy("/lib", "http.so")
+    replacement = admin_computer.File("/lib/http.so")
+    if not is_file(replacement) then
+        if is_file(backup) then backup.copy("/lib", "http.so")
+        return null
+    end if
+
+    poison_meta = remote_provider.load(replacement.path)
+    if not is_meta_lib(poison_meta) then
+        replacement.delete
+        if is_file(backup) then backup.copy("/lib", "http.so")
+        return null
+    end if
+
+    if is_file(backup) then backup.delete
+    staged = admin_computer.File(staged_path)
+    if is_file(staged) then staged.delete
+    diag("PoisonLib install | ready at /lib/http.so")
+    return poison_meta
+end function
+
+
+// ------------------------------ target action ------------------------------
+
+delete_for_wipe = function(computer, path)
+    item = computer.File(path)
+    if not is_file(item) then
+        diag("wipe " + path + " | already missing")
+        return true
+    end if
+    result = item.delete
+    if typeof(result).lower == "string" then
+        if result.len > 0 then
+            diag("wipe " + path + " | failed")
+            return false
+        end if
+    end if
+    diag("wipe " + path + " | deleted")
+    return true
+end function
+
+wipe_and_reboot = function(value, contract)
+    if not is_exact_target(value, contract) then return false
+    computer = computer_from(value)
+    if not has_root_access(computer) then return false
+
+    // Rebind the exact target immediately before the destructive action.
+    if computer.public_ip != contract.public_ip then return false
+    if computer.local_ip != contract.local_ip then return false
+
+    stage_log_finalizer(value, "target", contract)
+    diag_critical("wipe commit | exact target=" + computer.public_ip + "/" + computer.local_ip)
+    boot_ok = delete_for_wipe(computer, "/boot")
+    library_ok = delete_for_wipe(computer, "/lib")
+    system_ok = delete_for_wipe(computer, "/sys")
+    if not boot_ok or not library_ok or not system_ok then
+        diag("wipe commit | one or more deletions reported failure")
+    end if
+    computer.reboot
+    diag_critical("wipe commit | reboot requested")
+    return true
+end function
+
+
+try_exact_result = function(value, contract, allow_callback = true)
+    if not is_exact_target(value, contract) then return false
+    stage_log_finalizer(value, "target", contract)
+    computer = computer_from(value)
+    kind = typeof(value).lower
+    authority = authority_user(computer)
+    observation_key = kind + "|" + authority
+    if globals.exact_observations.hasIndex(observation_key) then
+        metric_add("exact_observation_duplicates")
+        return false
+    end if
+    globals.exact_observations[observation_key] = 1
+    metric_add("exact_observations")
+    diag_critical("exact victim observed | object=" + kind +
+        " | host=" + computer.public_ip + "/" + computer.local_ip +
+        " | authority=" + authority +
+        " | usable_shell=" + yes_no(is_shell(value)))
+    if has_root_access(computer) then return wipe_and_reboot(value, contract)
+    root_password = capture_root_password(value, contract)
+    if typeof(root_password).lower != "string" then root_password = ""
+    if not is_shell(value) then
+        if root_password != "" then
+            diag("exact victim observed | root credential captured; awaiting shell or service reconnect")
+        else
+            diag("exact victim observed | identity only; no usable shell authority")
+        end if
+        return false
+    end if
+
+    remote_context = import_remote_context(value, contract.local_ip, root_password)
+    if is_shell(remote_context.root_shell) then
+        diag_value("exact victim credential escalation", remote_context.root_shell, contract)
+        return wipe_and_reboot(remote_context.root_shell, contract)
+    end if
+    remote_provider = remote_context.provider
+    if not is_metaxploit(remote_provider) then
+        diag("exact victim shell | provider import failed")
+        return false
+    end if
+
+    if allow_callback then
+        rshell = request_rshell(remote_provider, contract)
+        if is_shell(rshell) then
+            diag_value("requested rshell", rshell, contract)
+            rshell_computer = rshell.host_computer
+            if has_root_access(rshell_computer) then return wipe_and_reboot(rshell, contract)
+        end if
+    end if
+
+    root_result = escalate_host_libraries(remote_provider, computer, value, contract)
+    if root_result then
+        diag_value("local library escalation", root_result, contract)
+        return wipe_and_reboot(root_result, contract)
+    end if
+    diag("exact victim shell | escalation exhausted")
+    return false
+end function
+
+
+add_route_shell = function(shells, value)
+    if not is_shell(value) then return
+    computer = value.host_computer
+    if not is_computer(computer) then return
+    stage_log_finalizer(value, "route")
+    for existing in shells
+        if is_same_host(existing, computer) then
+            metric_add("route_shell_duplicates")
+            return
+        end if
+    end for
+    shells.push(value)
+    diag("route shell added | host=" + computer.public_ip + "/" + computer.local_ip + " | total=" + shells.len)
+end function
+
+
+try_intermediate_shell = function(intermediate_shell, contract, ports, route_shells)
+    if not is_shell(intermediate_shell) then return false
+    stage_log_finalizer(intermediate_shell, "route", contract)
+    intermediate_computer = intermediate_shell.host_computer
+    if not is_computer(intermediate_computer) then return false
+    root_password = decipher_root_password(intermediate_computer)
+    if typeof(root_password).lower != "string" then root_password = ""
+    remote_context = import_remote_context(intermediate_shell, contract.local_ip, root_password)
+    if is_shell(remote_context.root_shell) then
+        intermediate_shell = remote_context.root_shell
+        intermediate_computer = intermediate_shell.host_computer
+        stage_log_finalizer(intermediate_shell, "route", contract)
+        metric_add("root_shell_escalations")
+        diag_value("route credential escalation", intermediate_shell, contract)
+    end if
+    remote_provider = remote_context.provider
+    if not is_metaxploit(remote_provider) then
+        diag("remote context failed | host=" + intermediate_computer.public_ip + "/" + intermediate_computer.local_ip)
+        return false
+    end if
+
+    diag("remote context | host=" + intermediate_computer.public_ip + "/" + intermediate_computer.local_ip +
+        " | router=" + remote_context.router_ip +
+        " | ports=" + remote_context.ports.join(",") +
+        " | child_routers=" + remote_context.child_routers.join(","))
+
+    host_admin = null
+    host_escalation_attempted = false
+    if has_root_access(intermediate_computer) then
+        host_admin = intermediate_shell
+    else
+        host_escalation_attempted = true
+        host_admin = escalate_host_libraries(remote_provider, intermediate_computer, intermediate_shell, contract)
+        if is_shell(host_admin) then
+            intermediate_shell = host_admin
+            intermediate_computer = intermediate_shell.host_computer
+        end if
+    end if
+
+    for discovered_port in remote_context.ports
+        add_unique_number(ports, discovered_port)
+    end for
+    if remote_context.ports.len > 0 then
+        print("  LAN ports -> " + remote_context.ports.join(" "))
+    end if
+
+    // An ordinary LAN shell can attack its current router and any directly
+    // attached child router.  Each returned shell becomes the next bounded hop.
+    if not is_router_computer(intermediate_computer) then
+        router_hops = []
+        add_unique_string(router_hops, remote_context.router_ip)
+        for child_router in remote_context.child_routers
+            add_unique_string(router_hops, child_router)
+        end for
+
+        for router_ip in router_hops
+            if router_ip == "" then continue
+            print("  Router hop -> " + router_ip)
+            for result in attack_endpoint(remote_provider, router_ip, 0, contract.local_ip, true, contract, CREDENTIAL_INJECT, intermediate_shell)
+                if try_exact_result(result, contract) then return true
+                add_route_shell(route_shells, result)
+            end for
+        end for
+    end if
+
+    // PoisonLib is a router library.  Installing it on an ordinary rooted LAN
+    // host only re-exploits that same host and cannot create the requested hop.
+    if not is_exact_target(intermediate_shell, contract) and is_router_computer(intermediate_computer) then
+        host_key = intermediate_computer.public_ip + "/" + intermediate_computer.local_ip
+        poison_meta = null
+
+        if globals.poisoned_hosts.hasIndex(host_key) then
+            poison_meta = remote_provider.load(globals.poisoned_hosts[host_key])
+        else
+            staged_path = stage_poison_http(intermediate_shell)
+            if typeof(staged_path) == "string" then
+                if not host_admin then
+                    host_admin = intermediate_computer
+                    if not has_root_access(host_admin) and not host_escalation_attempted then
+                        host_admin = escalate_host_libraries(remote_provider, intermediate_computer, intermediate_shell, contract)
+                    end if
+                end if
+                if host_admin then poison_meta = poison_host_http(remote_provider, host_admin, staged_path)
+            end if
+
+            if is_meta_lib(poison_meta) then globals.poisoned_hosts[host_key] = "/lib/http.so"
+        end if
+
+        if is_meta_lib(poison_meta) then
+            print("  PoisonLib jump -> " + contract.local_ip)
+            for result in scan_and_fire(globals.metaxploit, poison_meta, contract.local_ip, true, contract)
+                if try_exact_result(result, contract) then return true
+                add_route_shell(route_shells, result)
+            end for
+        end if
+    end if
+
+    for port in ports
+        print("  Internal " + contract.local_ip + ":" + port)
+        for result in attack_endpoint(remote_provider, contract.local_ip, port, CREDENTIAL_INJECT, true, contract, "", intermediate_shell)
+            if try_exact_result(result, contract) then return true
+            add_route_shell(route_shells, result)
+        end for
+    end for
+    return false
+end function
+
+
+metric_value = function(name)
+    if globals.contract_metrics.hasIndex(name) then return globals.contract_metrics[name]
+    return 0
+end function
+
+
+contract_outcome = function(ok, reason)
+    save_vuln_db
+    diag_critical("contract metrics" +
+        " | endpoints=" + metric_value("endpoint_attempts") +
+        " | endpoint_duplicates_skipped=" + metric_value("endpoint_duplicates_skipped") +
+        " | overflows=" + metric_value("overflow_attempts") +
+        " | reconnects=" + metric_value("reconnect_attempts") +
+        " | exact_observations=" + metric_value("exact_observations") +
+        " | exact_duplicates=" + metric_value("exact_observation_duplicates") +
+        " | route_shell_duplicates=" + metric_value("route_shell_duplicates") +
+        " | root_deciphers=" + metric_value("root_decipher_successes") + "/" + metric_value("root_decipher_attempts") +
+        " | passwd_unreadable=" + metric_value("root_passwd_unreadable") +
+        " | root_shell_escalations=" + metric_value("root_shell_escalations") +
+        " | network_root_reuses=" + metric_value("network_root_reuses") +
+        " | vuln_cache=" + metric_value("vuln_cache_hits") + "/" + metric_value("vuln_cache_misses") +
+        " | vuln_state_skips=" + metric_value("vuln_state_skips") +
+        " | vuln_db_saves=" + metric_value("vuln_db_saves") +
+        " | log_staged=" + metric_value("log_finalizers_staged") +
+        " | log_unavailable=" + metric_value("log_finalizer_unavailable") +
+        " | log_unbound_endpoints=" + metric_value("log_unbound_endpoints"))
+    return {"ok": ok, "reason": reason}
+end function
+
+
+run_contract = function(contract)
+    globals.contract_metrics = {}
+    globals.attempted_endpoints = {}
+    globals.exact_observations = {}
+    globals.contract_log_finalizers = []
+    globals.contract_log_finalizer_keys = {}
+    diag_critical("contract start | target=" + contract.public_ip + "/" + contract.local_ip)
+    inbound = find_exact_rshell(contract)
+    if is_shell(inbound) then
+        print("  Existing rshell -> " + contract.local_ip)
+        if try_exact_result(inbound, contract, false) then
+            return contract_outcome(1, "wiped and rebooted")
+        end if
+    end if
+
+    router = get_router(contract.public_ip)
+    if not router then router = get_switch(contract.public_ip)
+    if not is_route_device(router) then
+        diag("contract stop | router unavailable")
+        return contract_outcome(0, "router unavailable")
+    end if
+    ports = route_ports(router, contract)
+    diag("outside map | direct=" + ports.direct.join(",") +
+        " | external=" + ports.external.join(",") +
+        " | internal=" + ports.internal.join(","))
+
+    // Directly forwarded services mapped to the exact contract LAN target.
+    direct_attempted = []
+    for port in ports.direct
+        add_unique_number(direct_attempted, port)
+        print("  Direct " + contract.public_ip + ":" + port)
+        for result in attack_endpoint(globals.metaxploit, contract.public_ip, port, CREDENTIAL_INJECT, true, contract, "", globals.local_shell)
+            if try_exact_result(result, contract) then return contract_outcome(1, "wiped and rebooted")
+        end for
+    end for
+
+    // Router bounce.  Try the exact LAN injection and the plain router result;
+    // a returned router/intermediate shell can carry the remote provider inward.
+    print("  Router bounce -> " + contract.local_ip)
+    bounce_results = attack_endpoint(globals.metaxploit, contract.public_ip, 0, contract.local_ip, true, contract, CREDENTIAL_INJECT, globals.local_shell)
+    route_shells = []
+    for result in bounce_results
+        if try_exact_result(result, contract) then return contract_outcome(1, "wiped and rebooted")
+        add_route_shell(route_shells, result)
+    end for
+
+    // Firewall-changing overflows are side effects, not access objects.  RAFT
+    // remaps after them; refresh once before choosing the remaining services.
+    refreshed_router = get_router(contract.public_ip)
+    if not refreshed_router then refreshed_router = get_switch(contract.public_ip)
+    if is_route_device(refreshed_router) then
+        refreshed = route_ports(refreshed_router, contract)
+        for port in refreshed.direct
+            add_unique_number(ports.direct, port)
+        end for
+        for port in refreshed.external
+            add_unique_number(ports.external, port)
+        end for
+        for port in refreshed.internal
+            add_unique_number(ports.internal, port)
+        end for
+        diag("refreshed map | direct=" + ports.direct.join(",") +
+            " | external=" + ports.external.join(",") +
+            " | internal=" + ports.internal.join(","))
+    end if
+
+    for port in ports.direct
+        if direct_attempted.indexOf(port) != null then continue
+        add_unique_number(direct_attempted, port)
+        print("  Direct refreshed " + contract.public_ip + ":" + port)
+        for result in attack_endpoint(globals.metaxploit, contract.public_ip, port, CREDENTIAL_INJECT, true, contract, "", globals.local_shell)
+            if try_exact_result(result, contract) then return contract_outcome(1, "wiped and rebooted")
+            add_route_shell(route_shells, result)
+        end for
+    end for
+
+    // A router shell is the shortest proven route.  Consume it immediately
+    // before spending work on unrelated externally exposed LAN services.
+    route_index = 0
+    while route_index < route_shells.len and route_index < MAX_ROUTE_SHELLS
+        intermediate_shell = route_shells[route_index]
+        route_index = route_index + 1
+        diag("route attempt | index=" + route_index + " | queued=" + route_shells.len + " | source=router_bounce")
+        if try_intermediate_shell(intermediate_shell, contract, ports.internal, route_shells) then
+            return contract_outcome(1, "wiped and rebooted")
+        end if
+    end while
+
+    // If the router itself did not give a shell, use another exposed LAN host
+    // as the jump point.  Exact target identity is still required before wipe.
+    for port in ports.external
+        print("  Jump candidate " + contract.public_ip + ":" + port)
+        for result in attack_endpoint(globals.metaxploit, contract.public_ip, port, CREDENTIAL_INJECT, true, contract, "", globals.local_shell)
+            if try_exact_result(result, contract) then return contract_outcome(1, "wiped and rebooted")
+            add_route_shell(route_shells, result)
+        end for
+    end for
+
+    while route_index < route_shells.len and route_index < MAX_ROUTE_SHELLS
+        intermediate_shell = route_shells[route_index]
+        route_index = route_index + 1
+        diag("route attempt | index=" + route_index + " | queued=" + route_shells.len + " | source=exposed_service")
+        if try_intermediate_shell(intermediate_shell, contract, ports.internal, route_shells) then
+            return contract_outcome(1, "wiped and rebooted")
+        end if
+    end while
+
+    inbound = find_exact_rshell(contract)
+    if is_shell(inbound) then
+        print("  Incoming rshell -> " + contract.local_ip)
+        if try_exact_result(inbound, contract, false) then
+            return contract_outcome(1, "wiped and rebooted")
+        end if
+    end if
+
+    diag("contract stop | all access paths exhausted | route_hosts=" + route_shells.len)
+    return contract_outcome(0, "all available access paths exhausted")
+end function
+
+
+print_summary = function(results)
+    print(char(10) + "<size=125%><b>AutoCorrupt results</b></size>")
+    success = 0
+    for result in results
+        if result.ok == 1 then
+            success = success + 1
+            print("[" + result.index + "] OK   " + result.public_ip + " / " + result.local_ip)
+        else
+            print("[" + result.index + "] FAIL " + result.public_ip + " / " + result.local_ip + " - " + result.reason)
+        end if
+    end for
+    print("Completed " + success + " of " + results.len + " selected corrupt job(s).")
+end function
+
+
+// ------------------------------ startup ------------------------------
+
+globals.local_shell = get_shell
+globals.log_seq = 0
+globals.debug_file = null
+globals.debug_folder = null
+globals.debug_paths = []
+globals.debug_pending = []
+globals.debug_file_failed = false
+globals.debug_part = 0
+globals.debug_run_id = 0
+globals.contract_metrics = {}
+globals.attempted_endpoints = {}
+globals.exact_observations = {}
+globals.contract_log_finalizers = []
+globals.contract_log_finalizer_keys = {}
+globals.run_log_finalizers = []
+globals.run_log_finalizer_keys = {}
+globals.log_finalizer_local_reported = false
+if not is_shell(globals.local_shell) then exit("Unable to access the local shell.")
+globals.local_computer = globals.local_shell.host_computer
+if not is_computer(globals.local_computer) then exit("Unable to access the local computer.")
+if not globals.local_computer.is_network_active then exit("Network is not active.")
+
+init_debug_log
+diag_critical("startup | version=" + SCRIPT_VERSION +
+    " | execution_host=" + globals.local_computer.public_ip + "/" + globals.local_computer.local_ip +
+    " | active_user=" + active_user)
+
+globals.metaxploit = include_lib("/lib/metaxploit.so")
+if not is_metaxploit(globals.metaxploit) then exit("Missing or incompatible /lib/metaxploit.so.")
+globals.crypto = include_lib("/lib/crypto.so")
+globals.root_passwords = {}
+globals.network_root_passwords = {}
+globals.root_password_attempted = {}
+globals.root_passwd_unreadable = {}
+globals.poisoned_hosts = {}
+globals.rshell_provider = null
+globals.rshell_server_shell = null
+load_vuln_db
+
+entered_pin = user_input("PIN: ", 1)
+if PIN != "" then
+    if entered_pin != PIN then exit("Incorrect PIN.")
+end if
+
+mail_user = MAIL_USER
+if mail_user == "" then mail_user = user_mail_address
+mail_password = MAIL_PASSWORD
+if mail_password == "" then mail_password = entered_pin
+if mail_user == "" then exit("No active MetaMail address was found.")
+if mail_password == "" then exit("Missing MetaMail password.")
+globals.mail_user = mail_user
+globals.mail_password = mail_password
+
+globals.meta_mail = mail_login(globals.mail_user, globals.mail_password)
+if typeof(globals.meta_mail).lower != "metamail" then exit("MetaMail login failed.")
+
+print("AutoCorrupt " + SCRIPT_VERSION)
+contracts = load_contracts
+print_contracts(contracts)
+selected = select_contracts(contracts)
+if selected.len == 0 then exit("No valid contracts selected.")
+
+results = []
+for contract in selected
+    print(char(10) + "[" + contract.index + "] " + contract.public_ip + " / " + contract.local_ip)
+    outcome = run_contract(contract)
+    finalize_contract_logs(contract)
+    diag_critical("contract result | index=" + contract.index +
+        " | victim=" + contract.public_ip + "/" + contract.local_ip +
+        " | ok=" + outcome.ok +
+        " | reason=" + outcome.reason)
+    results.push({
+        "index": contract.index,
+        "public_ip": contract.public_ip,
+        "local_ip": contract.local_ip,
+        "ok": outcome.ok,
+        "reason": outcome.reason})
+end for
+
+finalize_run_logs
+print_summary(results)
+save_vuln_db
+diag_critical("run complete | selected=" + results.len)
+flush_debug
+if DIAGNOSTIC_LOG and globals.debug_paths.len > 0 then
+    print("Diagnostic log file(s):")
+    for path in globals.debug_paths
+        print("  " + path)
+    end for
+end if
