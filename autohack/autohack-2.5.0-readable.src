@@ -1,0 +1,4176 @@
+//Made By Hobo & Rowan
+// AutoHack 2.5.0 retained-access, exact-LAN discovery, embedded deep
+// recon, poison-library promotion, interesting-file inventory, Blackout, and
+// host-fortification tool for Grey Hack Public v0.9.6773.
+//
+// AutoHack is a clean rebuild informed by the preserved BlueHack donor, the
+// field-proven Auto Family engines, and the preserved Nmap Synthwave Deep Recon
+// 1.0.0 donor. One public IP plus an optional port and/or exact LAN IP drives
+// the whole access sequence: discover every visible endpoint, reuse or expand
+// ACVDB3, rank exploits, recover root credentials, retain the strongest usable
+// shell, and replace computer/router logs before and after operator-opened
+// target actions. The two-address form <public-ip> <lan-ip> scans every visible
+// service while requiring that exact LAN machine; the three-address form adds
+// an exact service port. The native nmap command embeds the complete read-only
+// synthwave topology engine and always returns to the persistent AutoHack
+// console without altering retained access state.
+// The interesting command records non-stock metadata without reading contents.
+// The Rowan circuit prompt keeps execution origin, selected retained target,
+// authority, and cleanup state visible. Matching weak libraries can be promoted
+// from /root/PoisonLibs through separately obtained root file/computer authority.
+// Confirmation-gated nuke and harden operations remain isolated from ordinary
+// attack and reconnaissance paths.
+
+SCRIPT_VERSION = "2.5.0"
+
+AUTOSCRIPTS_ROOT = "/root/autoscripts"
+APP_ROOT = "/root/autoscripts/autohack"
+LOG_ROOT = "/root/autoscripts/autohack/logs"
+
+VULN_DB_ROOT = "/root/vulndb"
+VULN_DB_INDEX_PATH = "/root/vulndb/index.txt"
+VULN_DB_INDEX_HEADER = "ACVDBINDEX3"
+VULN_DB_SHARD_PREFIX = "shard-"
+VULN_DB_SHARD_LIMIT = 120000
+VULN_DB_SOURCE = "autohack"
+
+MAX_RESULTS_PER_SERVICE = 24
+MAX_ACCESS_SESSIONS = 12
+INTERESTING_SCAN_LIMIT = 4000
+INTERESTING_RESULT_LIMIT = 250
+HELPER_WAIT_SECONDS = 60
+FINALIZER_WAIT_SECONDS = 2
+ROOT_PASSWORD_INJECT = "af2026"
+
+// Shared Auto Family weak-library arsenal. A file whose name matches the
+// currently attacked service library is eligible for endpoint promotion. The
+// initial field set is kernel_router.so and libhttp.so; future weak libraries
+// become available automatically when placed in this same directory.
+POISON_LIB_ROOT = "/root/PoisonLibs"
+REBOOT_SOURCE = "/bin/reboot"
+POISON_REBOOT_WAIT_SECONDS = 3
+
+// High-impact standalone operations. Nuke is bounded to these exact system
+// roots and never runs without an exact retained root shell plus a host-specific
+// confirmation. Harden affects only the AutoHack execution host and requires a
+// separate host-specific confirmation.
+NUKE_ROOTS = ["/boot", "/etc", "/home", "/lib", "/root", "/server", "/sys", "/usr"]
+NUKE_PRESERVE_BIN = ["/bin/rm", "/bin/rmdir"]
+NUKE_SCAN_LIMIT = 8000
+HOME_HARDEN_TRAVERSE = ["/", "/usr", "/usr/bin", "/bin"]
+HOME_HARDEN_EXECUTE = ["/usr/bin/Terminal.exe", "/bin/sudo", "/bin/bash"]
+
+// Development behavior. Unknown service libraries are scanned and added to the
+// shared ACVDB3 database. Disable this to use known vulnerability records only.
+LEARN_UNKNOWN_LIBRARIES = true
+
+// The target computer must always be cleaned. Target-router cleanup remains
+// best-effort because the verified clean execution route is the owned chain
+// break; its actual result is printed and written to diagnostics.
+REQUIRE_TARGET_ROUTER_CLEAN = false
+REQUIRE_EXECUTION_ROUTER_CLEAN = true
+
+COLOR_PURPLE = "#D86CFF"
+COLOR_CYAN = "#55E7FF"
+COLOR_GREEN = "#63FF9B"
+COLOR_RED = "#FF5C7C"
+COLOR_ORANGE = "#FFB86B"
+COLOR_PINK = "#FF79C6"
+
+// Known Grey Hack operating-system and service files. AutoHack suppresses only
+// these exact paths; an unfamiliar tool living beside them is still reported.
+// Comparisons are case-insensitive so player-created capitalization cannot make
+// an ordinary stock file look rare.
+INTERESTING_STOCK_PATHS = [
+    "/boot/kernel.img", "/boot/initrd.img", "/boot/system.map",
+    "/etc/passwd", "/etc/xorg.conf", "/etc/fstab",
+    "/etc/apt/sources.txt", "/etc/apt/aptcache.bin",
+    "/lib/init.so", "/lib/kernel_module.so", "/lib/net.so",
+    "/lib/aptclient.so", "/lib/metaxploit.so", "/lib/crypto.so",
+    "/lib/libsmtp.so", "/lib/libssh.so", "/lib/libhttp.so", "/lib/libftp.so",
+    "/sys/xorg.sys", "/sys/config.sys", "/sys/network.cfg", "/var/system.log",
+    "/bin/cd", "/bin/ls", "/bin/ps", "/bin/pwd", "/bin/ifconfig",
+    "/bin/iwconfig", "/bin/iwlist", "/bin/cat", "/bin/rm", "/bin/mv",
+    "/bin/cp", "/bin/ssh", "/bin/ftp", "/bin/mkdir", "/bin/rmdir",
+    "/bin/chmod", "/bin/reboot", "/bin/whois", "/bin/sudo", "/bin/useradd",
+    "/bin/userdel", "/bin/passwd", "/bin/nslookup", "/bin/build", "/bin/touch",
+    "/bin/chown", "/bin/chgrp", "/bin/groupadd", "/bin/groupdel", "/bin/groups",
+    "/bin/kill", "/bin/ping", "/bin/apt-get", "/bin/man", "/bin/whoami",
+    "/usr/bin/fileexplorer.exe", "/usr/bin/terminal.exe", "/usr/bin/mail.exe",
+    "/usr/bin/browser.exe", "/usr/bin/notepad.exe", "/usr/bin/settings.exe",
+    "/usr/bin/logviewer.exe", "/usr/bin/codeeditor.exe", "/usr/bin/imageviewer.exe",
+    "/usr/bin/pdfreader.exe", "/usr/bin/map.exe", "/usr/bin/manual.exe",
+    "/usr/bin/scanlan.exe", "/usr/bin/chat.exe",
+    "/server/smtpd", "/server/sshd", "/server/httpd", "/server/ftpd",
+    "/server/encode.src", "/server/decode.bin", "/server/conf/smtpd.conf",
+    "/server/conf/userconfig.sys", "/server/conf/sshd.conf",
+    "/server/conf/httpd.conf", "/server/conf/ftpd.conf",
+    "/public/htdocs/website.html",
+]
+
+
+paint = function(value, color)
+    return "<color=" + color + ">" + str(value) + "</color>"
+end function
+
+
+show_auto_action = function(label, detail = "", color = COLOR_PURPLE)
+    line = paint("◆ " + label, color)
+    if detail != "" then line = line + "  " + paint(detail, COLOR_CYAN)
+    print(line)
+end function
+
+
+show_attack_attempt = function(fingerprint, attempt, mode)
+    line = paint("◆ ATTACK", COLOR_PURPLE) + " " +
+        paint("[" + attempt + "]", COLOR_PINK) + " " +
+        paint(fingerprint, COLOR_CYAN) + "  " + paint(mode, COLOR_ORANGE)
+    print(line)
+end function
+
+
+show_attack_result = function(value, target_match = true)
+    kind = typeof(value).lower
+    if is_exploit_object(value) then
+        level = access_level(value)
+        if is_shell(value) and not target_match then
+            print(paint("  ╰─ OBJECT REJECTED", COLOR_ORANGE) + "  " +
+                paint("shell target mismatch", COLOR_RED))
+            return
+        end if
+        label = "OBJECT RETAINED"
+        if is_shell(value) then label = "ACCESS RETAINED"
+        print(paint("  ╰─ " + label, COLOR_GREEN) + "  " +
+            paint(kind, COLOR_CYAN) + "  " + paint(level, COLOR_PINK))
+        return
+    end if
+    if kind == "number" then
+        print(paint("  ╰─ PAYLOAD ACCEPTED", COLOR_GREEN) + "  " +
+            paint("numeric return", COLOR_PINK))
+        return
+    end if
+    print(paint("  ╰─ NO USABLE RESULT", COLOR_RED) + "  " +
+        paint(kind, COLOR_PURPLE))
+end function
+
+
+show_banner = function()
+    print("                       " + paint("◆", COLOR_PINK) + "      " +
+        paint("◆", COLOR_CYAN))
+    print(paint("                       │      │", COLOR_PURPLE))
+    print("    " + paint("◆", COLOR_PINK) +
+        paint("──────────╮   ╭───┴──────┴───╮", COLOR_PURPLE))
+    print(paint("               ├───┤   ", COLOR_PURPLE) +
+        paint("AUTOHACK", COLOR_PINK) + paint("   ├────────", COLOR_PURPLE) +
+        paint("◆", COLOR_GREEN))
+    print("    " + paint("◆", COLOR_CYAN) +
+        paint("──────────╯   ╰──────┬───────╯        │", COLOR_PURPLE))
+    print(paint("    │                     │         ╭──────╯", COLOR_PURPLE))
+    print(paint("    ╰─────────────────────", COLOR_PURPLE) +
+        paint("◆", COLOR_CYAN) + paint("─────────╯", COLOR_PURPLE))
+    print(paint("      ROWAN CIRCUIT // ", COLOR_PURPLE) + paint(SCRIPT_VERSION, COLOR_CYAN))
+end function
+
+
+join_path = function(folder, name)
+    if folder == "/" then return "/" + name
+    if folder[-1] == "/" then return folder + name
+    return folder + "/" + name
+end function
+
+
+is_file = function(value)
+    return typeof(value).lower == "file"
+end function
+
+
+is_shell = function(value)
+    return typeof(value).lower == "shell"
+end function
+
+
+is_computer = function(value)
+    return typeof(value).lower == "computer"
+end function
+
+
+is_session = function(value)
+    return typeof(value).lower == "netsession"
+end function
+
+
+is_meta_lib = function(value)
+    return typeof(value).lower == "metalib"
+end function
+
+
+is_exploit_object = function(value)
+    kind = typeof(value).lower
+    return kind == "shell" or kind == "computer" or kind == "file"
+end function
+
+
+add_unique = function(values, value)
+    if typeof(value).lower != "string" then return
+    if value == "" then return
+    if values.indexOf(value) == null then values.push(value)
+end function
+
+
+safe_field = function(value)
+    if typeof(value).lower != "string" then return false
+    if value.indexOf("|") != null then return false
+    if value.indexOf(char(10)) != null then return false
+    if value.indexOf(char(13)) != null then return false
+    return true
+end function
+
+
+db_field = function(value)
+    cleaned = str(value).replace("[|]", "/")
+    cleaned = cleaned.replace(char(10), " ")
+    cleaned = cleaned.replace(char(13), " ")
+    return cleaned.trim
+end function
+
+
+path_component = function(value)
+    cleaned = db_field(value)
+    cleaned = cleaned.replace("[/]", "_")
+    cleaned = cleaned.replace("[:]", "_")
+    cleaned = cleaned.replace(" ", "_")
+    cleaned = cleaned.replace("@", "_")
+    if cleaned == "" then cleaned = "unknown"
+    return cleaned
+end function
+
+
+pad4 = function(number)
+    digits = str(number)
+    while digits.len < 4
+        digits = "0" + digits
+    end while
+    return digits
+end function
+
+
+ensure_folder_path = function(path)
+    computer = globals.local_computer
+    current = "/"
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        next_path = join_path(current, part)
+        item = computer.File(next_path)
+        if is_file(item) then
+            if not item.is_folder then return null
+        else
+            if computer.create_folder(current, part) != 1 then return null
+            item = computer.File(next_path)
+            if not is_file(item) or not item.is_folder then return null
+        end if
+        current = next_path
+    end for
+    return computer.File(path)
+end function
+
+
+touch_file = function(folder, name)
+    if not is_file(folder) then return null
+    path = join_path(folder.path, name)
+    file = globals.local_computer.File(path)
+    if is_file(file) then return file
+    if globals.local_computer.touch(folder.path, name) != 1 then return null
+    return globals.local_computer.File(path)
+end function
+
+
+init_storage = function()
+    globals.app_folder = ensure_folder_path(APP_ROOT)
+    globals.log_folder = ensure_folder_path(LOG_ROOT)
+    globals.vuln_folder = ensure_folder_path(VULN_DB_ROOT)
+    if not is_file(globals.app_folder) then return false
+    if not is_file(globals.log_folder) then return false
+    if not is_file(globals.vuln_folder) then return false
+    return true
+end function
+
+
+terminal_diag = function(message, line)
+    lowered = message.lower
+    if lowered.indexOf("fail") != null or lowered.indexOf("reject") != null or
+        lowered.indexOf("risk") != null or lowered.indexOf("unavailable") != null then
+        return paint(line, COLOR_RED)
+    end if
+    if lowered.indexOf("clean") != null or lowered.indexOf("log ") != null or
+        lowered.indexOf("reboot") != null or lowered.indexOf("promotion") != null then
+        return paint(line, COLOR_ORANGE)
+    end if
+    if lowered.indexOf("credential recovered") != null or
+        lowered.indexOf("access retained") != null or
+        lowered.indexOf("root reconnect") != null or
+        lowered.indexOf("escalated") != null then return paint(line, COLOR_GREEN)
+    if lowered.indexOf("vuln") != null or lowered.indexOf("scan") != null or
+        lowered.indexOf("overflow") != null then return paint(line, COLOR_PURPLE)
+    if lowered.indexOf("verified") != null or lowered.indexOf("admitted") != null or
+        lowered.indexOf("success") != null then return paint(line, COLOR_GREEN)
+    if lowered.indexOf("host") != null or lowered.indexOf("ssh") != null or
+        lowered.indexOf("candidate") != null then return paint(line, COLOR_CYAN)
+    return line
+end function
+
+
+init_log = function()
+    globals.log_seq = 0
+    globals.log_pending = []
+    globals.log_file = touch_file(globals.log_folder, "latest.txt")
+    if not is_file(globals.log_file) then return false
+    header = "AutoHack diagnostic log" + char(10) +
+        "version=" + SCRIPT_VERSION + char(10) +
+        "started=" + current_date + char(10) +
+        "execution_host=" + globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+    return globals.log_file.set_content(header) == 1
+end function
+
+
+flush_log = function()
+    if not is_file(globals.log_file) then return false
+    if globals.log_pending.len == 0 then return true
+    content = globals.log_file.get_content
+    if typeof(content).lower != "string" then return false
+    if globals.log_file.set_content(content + char(10) + globals.log_pending.join(char(10))) != 1 then return false
+    globals.log_pending = []
+    return true
+end function
+
+
+diag = function(message)
+    globals.log_seq = globals.log_seq + 1
+    line = "[AHLOG " + globals.log_seq + "] " + message
+    print(terminal_diag(message, line))
+    globals.log_pending.push(line)
+    if globals.log_pending.len >= 10 then flush_log
+end function
+
+
+root_from_value = function(value)
+    if is_shell(value) then return value.host_computer.File("/")
+    if is_computer(value) then return value.File("/")
+    if is_file(value) then
+        current = value
+        while current.parent
+            current = current.parent
+        end while
+        return current
+    end if
+    return null
+end function
+
+
+computer_from_value = function(value)
+    if is_shell(value) then return value.host_computer
+    if is_computer(value) then return value
+    root = root_from_value(value)
+    if not is_file(root) then return null
+    return null
+end function
+
+
+child_named = function(folder, name)
+    if not is_file(folder) or not folder.is_folder then return null
+    folders = folder.get_folders
+    if typeof(folders).lower == "list" then
+        for child in folders
+            if child.name == name then return child
+        end for
+    end if
+    files = folder.get_files
+    if typeof(files).lower == "list" then
+        for child in files
+            if child.name == name then return child
+        end for
+    end if
+    return null
+end function
+
+
+file_from_root = function(root, path)
+    if not is_file(root) then return null
+    current = root
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        current = child_named(current, part)
+        if not is_file(current) then return null
+    end for
+    return current
+end function
+
+
+path_ends_with = function(path, suffix)
+    if typeof(path).lower != "string" or typeof(suffix).lower != "string" then return false
+    if suffix.len == 0 or path.len < suffix.len then return false
+    return path[path.len - suffix.len:] == suffix
+end function
+
+
+path_has_trash_component = function(path)
+    if typeof(path).lower != "string" then return false
+    for part in path.split("/")
+        if part.lower == ".trash" then return true
+    end for
+    return false
+end function
+
+
+path_is_hidden = function(path)
+    if typeof(path).lower != "string" then return false
+    for part in path.split("/")
+        if part.len > 1 and part[0] == "." then return true
+    end for
+    return false
+end function
+
+
+is_stock_interesting_path = function(path)
+    if typeof(path).lower != "string" then return true
+    return INTERESTING_STOCK_PATHS.indexOf(path.lower) != null
+end function
+
+
+interesting_category = function(file)
+    path = file.path.lower
+    if path_ends_with(path, ".src") then return "SOURCE"
+    if path.indexOf("chat") != null or path.indexOf("message") != null or
+        path.indexOf("mail.txt") != null then return "CHAT"
+    if path_ends_with(path, ".png") or path_ends_with(path, ".jpg") or
+        path_ends_with(path, ".jpeg") or path_ends_with(path, ".bmp") or
+        path_ends_with(path, ".gif") then return "IMAGE"
+    if path_ends_with(path, ".pdf") then return "PDF"
+    if path_ends_with(path, ".log") then return "LOG"
+    if path_ends_with(path, ".txt") or path_ends_with(path, ".md") or
+        path_ends_with(path, ".rtf") then return "DOCUMENT"
+    if path_ends_with(path, ".db") or path_ends_with(path, ".csv") or
+        path_ends_with(path, ".json") then return "DATA"
+    if path_ends_with(path, ".conf") or path_ends_with(path, ".cfg") then return "CONFIG"
+    if file.is_binary or path_ends_with(path, ".exe") or path_ends_with(path, ".bin") or
+        path_ends_with(path, ".so") or path_ends_with(path, ".5pk") or
+        path_ends_with(path, ".mx") then return "TOOL"
+    return "OTHER"
+end function
+
+
+interesting_color = function(category)
+    if category == "SOURCE" or category == "TOOL" then return COLOR_PURPLE
+    if category == "CHAT" then return COLOR_PINK
+    if category == "IMAGE" or category == "PDF" or category == "DATA" then return COLOR_CYAN
+    if category == "DOCUMENT" then return COLOR_GREEN
+    if category == "LOG" or category == "CONFIG" then return COLOR_ORANGE
+    return COLOR_PINK
+end function
+
+
+interesting_value = function(value)
+    if value == null then return "?"
+    return str(value)
+end function
+
+
+// Iterative and bounded so a large player machine or a symlink cycle cannot
+// turn a curiosity scan into an unbounded recursive walk. Hidden paths remain
+// eligible; only trash folders are skipped. Results retain strings and metadata,
+// never remote File objects or contents.
+inventory_interesting_files = function(root)
+    results = []
+    pending = [root]
+    seen = {}
+    scanned = 0
+    stock_ignored = 0
+    trash_skipped = 0
+    unreadable = 0
+    truncated = false
+    symlink_api = false
+
+    while pending.len > 0
+        if scanned >= INTERESTING_SCAN_LIMIT or results.len >= INTERESTING_RESULT_LIMIT then
+            truncated = true
+            break
+        end if
+
+        node = pending.pop
+        if not is_file(node) then
+            unreadable = unreadable + 1
+            continue
+        end if
+        path = node.path
+        if typeof(path).lower != "string" or path == "" then
+            unreadable = unreadable + 1
+            continue
+        end if
+        if seen.hasIndex(path) then continue
+        seen[path] = 1
+        scanned = scanned + 1
+
+        is_link = false
+        if node.hasIndex("is_symlink") then
+            symlink_api = true
+            is_link = node.is_symlink == 1
+        end if
+
+        if node.is_folder then
+            if path_has_trash_component(path) then
+                trash_skipped = trash_skipped + 1
+                continue
+            end if
+            if is_link then continue
+
+            folders = node.get_folders
+            files = node.get_files
+            if typeof(folders).lower == "list" then
+                for child in folders
+                    pending.push(child)
+                end for
+            else
+                unreadable = unreadable + 1
+            end if
+            if typeof(files).lower == "list" then
+                for child in files
+                    pending.push(child)
+                end for
+            else
+                unreadable = unreadable + 1
+            end if
+            continue
+        end if
+
+        if is_stock_interesting_path(path) then
+            stock_ignored = stock_ignored + 1
+            continue
+        end if
+
+        results.push({
+            "path": path,
+            "category": interesting_category(node),
+            "size": interesting_value(node.size),
+            "owner": interesting_value(node.owner),
+            "permissions": interesting_value(node.permissions),
+            "hidden": path_is_hidden(path),
+        })
+    end while
+
+    return {
+        "results": results,
+        "scanned": scanned,
+        "stock_ignored": stock_ignored,
+        "trash_skipped": trash_skipped,
+        "unreadable": unreadable,
+        "truncated": truncated,
+        "symlink_api": symlink_api,
+    }
+end function
+
+
+print_interesting_inventory = function(scan, access, session_index)
+    print(char(10) + paint("INTERESTING FILES", COLOR_PURPLE) + " [" +
+        paint(session_index, COLOR_CYAN) + "]")
+    print("Host: " + paint(access.public_ip, COLOR_CYAN) + "/" +
+        paint(access.local_ip, COLOR_CYAN) + "  Authority: " +
+        paint(access.authority, COLOR_PINK))
+    print("Items examined: " + paint(scan.scanned, COLOR_GREEN) +
+        "  Stock ignored: " + paint(scan.stock_ignored, COLOR_ORANGE) +
+        "  Interesting: " + paint(scan.results.len, COLOR_PINK))
+
+    if scan.results.len == 0 then
+        print(paint("No non-stock files were visible through this retained session.", COLOR_ORANGE))
+    else
+        for index in range(0, scan.results.len - 1)
+            item = scan.results[index]
+            hidden = ""
+            if item.hidden then hidden = " " + paint("HIDDEN", COLOR_ORANGE)
+            print("[" + paint(index, COLOR_CYAN) + "] " +
+                paint(item.category, interesting_color(item.category)) + hidden + "  " +
+                paint(item.path, COLOR_CYAN))
+            print("    size=" + item.size + "  owner=" + paint(item.owner, COLOR_PINK) +
+                "  permissions=" + item.permissions)
+        end for
+    end if
+
+    if scan.trash_skipped > 0 then
+        print(paint("Skipped " + str(scan.trash_skipped) + " trash folder(s).", COLOR_ORANGE))
+    end if
+    if scan.unreadable > 0 then
+        print(paint(str(scan.unreadable) + " filesystem location(s) could not be enumerated.", COLOR_ORANGE))
+    end if
+    if not scan.symlink_api then
+        print(paint("This runtime did not expose is_symlink; duplicate paths and hard limits still bounded the scan.", COLOR_ORANGE))
+    end if
+    if scan.truncated then
+        print(paint("Inventory limit reached; results are intentionally truncated.", COLOR_ORANGE))
+    end if
+    print("This command lists metadata only. It does not read or download file contents.")
+end function
+
+
+has_rwx = function(value)
+    if not is_file(value) then return false
+    if not value.has_permission("r") then return false
+    if not value.has_permission("w") then return false
+    return value.has_permission("x")
+end function
+
+
+access_level = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return "none"
+    root_home = file_from_root(root, "/root")
+    if has_rwx(root_home) then return "root"
+    home = file_from_root(root, "/home")
+    if not is_file(home) then return "guest"
+    folders = home.get_folders
+    if typeof(folders).lower != "list" then return "guest"
+    for folder in folders
+        if folder.name == "guest" then continue
+        if has_rwx(folder) then return "user"
+    end for
+    return "guest"
+end function
+
+
+scrub_source_from_value = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return null
+    for path in ["/var/silentclean", "/etc/fstab", "/etc/xorg.conf"]
+        candidate = file_from_root(root, path)
+        if not is_file(candidate) then continue
+        if candidate.is_folder or candidate.is_binary then continue
+        if candidate.has_permission("r") then return candidate
+    end for
+    etc = file_from_root(root, "/etc")
+    if not is_file(etc) then return null
+    files = etc.get_files
+    if typeof(files).lower != "list" then return null
+    for candidate in files
+        if candidate.is_folder or candidate.is_binary then continue
+        if candidate.has_permission("r") then return candidate
+    end for
+    return null
+end function
+
+
+stage_clean_source = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return null
+
+    // Grey Hack's File.copy overwrite gate is the destination folder's write
+    // permission, not the existing file's write bit. This deliberately matches
+    // the runtime operation clean_source performs and permits the proven case
+    // where a non-root object can replace /var/system.log through writable /var.
+    var_folder = file_from_root(root, "/var")
+    if not is_file(var_folder) or not var_folder.is_folder then return null
+    if not var_folder.has_permission("w") then return null
+    return scrub_source_from_value(value)
+end function
+
+
+clean_source = function(source)
+    if not is_file(source) then return false
+    return source.copy("/var", "system.log") == 1
+end function
+
+
+unsafe_checks = function(provider, meta_lib, region)
+    checks = []
+    scan_text = provider.scan_address(meta_lib, region)
+    if typeof(scan_text).lower != "string" then return checks
+    pieces = scan_text.split("Unsafe check: ")
+    if pieces.len < 2 then return checks
+    for piece in pieces[1:]
+        start = piece.indexOf("<b>")
+        finish = piece.indexOf("</b>")
+        if start == null or finish == null then continue
+        if finish <= start + 3 then continue
+        unsafe = piece[start + 3:finish].replace(char(10), "").trim
+        if unsafe != "" and checks.indexOf(unsafe) == null then checks.push(unsafe)
+    end for
+    return checks
+end function
+
+
+stage_local_router_source = function(provider_path = "/lib/metaxploit.so")
+    bridge = get_custom_object
+    bridge.an_router_attempts = 0
+    bridge.an_router_objects = 0
+    bridge.an_router_detail = "starting"
+    router = get_router
+    if typeof(router).lower != "router" then
+        bridge.an_router_detail = "router-unavailable"
+        return null
+    end if
+    provider = include_lib(provider_path)
+    if typeof(provider).lower != "metaxploitlib" then
+        bridge.an_router_detail = "provider-unavailable"
+        return null
+    end if
+    session = provider.net_use(router.public_ip, 0)
+    if not is_session(session) then
+        bridge.an_router_detail = "kernel-session-unavailable"
+        return null
+    end if
+    meta_lib = session.dump_lib
+    if not is_meta_lib(meta_lib) then
+        bridge.an_router_detail = "kernel-library-unavailable"
+        return null
+    end if
+    regions = provider.scan(meta_lib)
+    if typeof(regions).lower != "list" then
+        bridge.an_router_detail = "kernel-scan-unavailable"
+        return null
+    end if
+    for region in regions
+        for unsafe in unsafe_checks(provider, meta_lib, region)
+            // Router COMPUTER results require a LAN IP. CHANGE_PASS results
+            // require an alphanumeric payload. Other result types ignore the
+            // argument, so these two calls cover every runtime result family
+            // without the former duplicate no-argument attempt.
+            bridge.an_router_attempts = bridge.an_router_attempts + 1
+            show_attack_attempt(
+                vuln_fingerprint(meta_lib),
+                bridge.an_router_attempts,
+                "router LAN payload")
+            result = meta_lib.overflow(region, unsafe, router.local_ip)
+            show_attack_result(result)
+            if is_exploit_object(result) then
+                bridge.an_router_objects = bridge.an_router_objects + 1
+            end if
+            source = stage_clean_source(result)
+            if is_file(source) then
+                bridge.an_router_detail = "cleanup-source-ready"
+                return source
+            end if
+
+            bridge.an_router_attempts = bridge.an_router_attempts + 1
+            show_attack_attempt(
+                vuln_fingerprint(meta_lib),
+                bridge.an_router_attempts,
+                "router credential payload")
+            result = meta_lib.overflow(region, unsafe, ROOT_PASSWORD_INJECT)
+            show_attack_result(result)
+            if is_exploit_object(result) then
+                bridge.an_router_objects = bridge.an_router_objects + 1
+            end if
+            source = stage_clean_source(result)
+            if is_file(source) then
+                bridge.an_router_detail = "cleanup-source-ready"
+                return source
+            end if
+        end for
+    end for
+    bridge.an_router_detail = "kernel-access-exhausted"
+    return null
+end function
+
+
+router_helper_mode = function()
+    bridge = get_custom_object
+    bridge.an_router_source = null
+    bridge.an_router_status = "running"
+    provider_path = "/lib/metaxploit.so"
+    if params.len > 1 then provider_path = params[1]
+    source = stage_local_router_source(provider_path)
+    if is_file(source) then
+        bridge.an_router_source = source
+        bridge.an_router_status = "ready"
+    else
+        bridge.an_router_status = "unavailable"
+    end if
+    exit
+end function
+
+
+writable_folder = function(shell)
+    if not is_shell(shell) then return null
+    computer = shell.host_computer
+    root = computer.File("/root")
+    if is_file(root) and root.has_permission("w") and root.has_permission("x") then return root
+    homes = computer.File("/home")
+    if not is_file(homes) then return null
+    folders = homes.get_folders
+    if typeof(folders).lower != "list" then return null
+    for folder in folders
+        if folder.has_permission("w") and folder.has_permission("x") then return folder
+    end for
+    return null
+end function
+
+
+deploy_router_helper = function(remote_shell)
+    work = writable_folder(remote_shell)
+    if not is_file(work) then return {"helper": "", "provider": "",
+        "provider_owned": false, "status": "no-work-folder",}
+    source_file = globals.local_computer.File(program_path)
+    if not is_file(source_file) then return {"helper": "", "provider": "",
+        "provider_owned": false, "status": "helper-missing",}
+    if globals.local_shell.scp(program_path, work.path, remote_shell) != 1 then
+        return {"helper": "", "provider": "", "provider_owned": false,
+            "status": "helper-copy-failed",}
+    end if
+    helper_path = join_path(work.path, source_file.name)
+    if not is_file(remote_shell.host_computer.File(helper_path)) then
+        return {"helper": "", "provider": "", "provider_owned": false,
+            "status": "helper-not-found",}
+    end if
+
+    // Direct SCP is the field-proven provider path used by the other Auto
+    // workers. File.copy from /lib into APP_ROOT can fail even when scp is
+    // permitted, which is exactly what Dev3 reported as provider-stage-failed.
+    provider_path = join_path(work.path, "metaxploit.so")
+    remote_provider = remote_shell.host_computer.File(provider_path)
+    provider_owned = false
+    if is_file(remote_provider) then
+        if not remote_provider.allow_import then
+            return {"helper": helper_path, "provider": "", "provider_owned": false,
+                "status": "provider-name-conflict",}
+        end if
+    else
+        copy_result = globals.local_shell.scp("/lib/metaxploit.so", work.path, remote_shell)
+        remote_provider = remote_shell.host_computer.File(provider_path)
+        if copy_result != 1 or not is_file(remote_provider) then
+            return {"helper": helper_path, "provider": "", "provider_owned": false,
+                "status": "provider-copy-failed",}
+        end if
+        if not remote_provider.allow_import then
+            return {"helper": helper_path, "provider": provider_path, "provider_owned": true,
+                "status": "provider-not-importable",}
+        end if
+        provider_owned = true
+    end if
+    return {"helper": helper_path, "provider": provider_path,
+        "provider_owned": provider_owned, "status": "ready",}
+end function
+
+
+stage_remote_router_source = function(remote_shell)
+    deployment = deploy_router_helper(remote_shell)
+    helper_path = deployment.helper
+    provider_path = deployment.provider
+    if helper_path == "" or provider_path == "" then return {"source": null,
+        "helper": helper_path, "provider": provider_path,
+        "provider_owned": deployment.provider_owned,
+        "attempts": 0, "objects": 0, "status": deployment.status,
+        "detail": "not-launched",}
+    bridge = get_custom_object
+    bridge.an_router_source = null
+    bridge.an_router_status = "waiting"
+    bridge.an_router_attempts = 0
+    bridge.an_router_objects = 0
+    bridge.an_router_detail = "waiting"
+    remote_shell.launch(helper_path, "--router-clean-helper " + provider_path)
+    waited = 0
+    while waited < HELPER_WAIT_SECONDS
+        if bridge.an_router_status != "waiting" and bridge.an_router_status != "running" then break
+        wait(0.2)
+        waited = waited + 0.2
+    end while
+    source = bridge.an_router_source
+    status = bridge.an_router_status
+    attempts = bridge.an_router_attempts
+    objects = bridge.an_router_objects
+    detail = bridge.an_router_detail
+    bridge.an_router_source = null
+    return {"source": source, "helper": helper_path, "provider": provider_path,
+        "provider_owned": deployment.provider_owned,
+        "attempts": attempts, "objects": objects, "status": status, "detail": detail,}
+end function
+
+
+delete_remote_artifact = function(remote_shell, path)
+    if not is_shell(remote_shell) or path == "" then return
+    file = remote_shell.host_computer.File(path)
+    if is_file(file) then file.delete
+end function
+
+
+decipher_root_password = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return null
+    passwd = file_from_root(root, "/etc/passwd")
+    if not is_file(passwd) or not passwd.has_permission("r") then return null
+    content = passwd.get_content
+    if typeof(content).lower != "string" then return null
+    root_hash = ""
+    for line in content.split(char(10))
+        fields = line.trim.split(":")
+        if fields.len < 2 then continue
+        if fields[0] == "root" then
+            root_hash = fields[1].trim
+            break
+        end if
+    end for
+    if root_hash == "" then return null
+    if root_hash == "ced421b174bd05a560a4f098565d4c7b" then return "madeinRussia"
+    password = globals.crypto.decipher(root_hash)
+    if typeof(password).lower != "string" or password == "" then return null
+    return password
+end function
+
+
+vuln_fingerprint = function(meta_lib)
+    return meta_lib.lib_name + "@" + meta_lib.version
+end function
+
+
+vuln_major = function(version)
+    parts = str(version).split("[.]")
+    if parts.len == 0 then return "unknown"
+    return path_component(parts[0])
+end function
+
+
+vuln_bucket_key_values = function(library, version)
+    return str(library) + "@V" + vuln_major(version)
+end function
+
+
+vuln_mode = function(requirement)
+    lowered = requirement.lower
+    if lowered.indexOf("password") != null then return "password"
+    if lowered.indexOf("lan ip") != null or lowered.indexOf("local ip") != null or
+        lowered.indexOf("same subnet") != null or lowered.indexOf("same network") != null or
+        lowered.indexOf("router membership") != null then return "lan"
+    if lowered.trim == "" then return "plain"
+    return "unknown"
+end function
+
+
+vuln_shard_name = function(number)
+    return VULN_DB_SHARD_PREFIX + pad4(number) + ".txt"
+end function
+
+
+vuln_folder_named = function(name, create = false)
+    path = join_path(VULN_DB_ROOT, name)
+    folder = globals.local_computer.File(path)
+    if is_file(folder) then
+        if folder.is_folder then return folder
+        return null
+    end if
+    if not create then return null
+    return ensure_folder_path(path)
+end function
+
+
+vuln_bucket_folder = function(library, version, create = false)
+    library_folder = vuln_folder_named(path_component(library), create)
+    if not is_file(library_folder) then return null
+    path = join_path(library_folder.path, "V" + vuln_major(version))
+    folder = globals.local_computer.File(path)
+    if is_file(folder) then
+        if folder.is_folder then return folder
+        return null
+    end if
+    if not create then return null
+    return ensure_folder_path(path)
+end function
+
+
+merge_vuln = function(fingerprint, incoming)
+    if not globals.vulns.hasIndex(fingerprint) then globals.vulns[fingerprint] = []
+    for known in globals.vulns[fingerprint]
+        if known.region != incoming.region or known.unsafe != incoming.unsafe or
+            known.mode != incoming.mode then continue
+        if incoming.score > known.score then
+            known.score = incoming.score
+            known.last_kind = incoming.last_kind
+        end if
+        if incoming.hits > known.hits then known.hits = incoming.hits
+        if incoming.attempts > known.attempts then known.attempts = incoming.attempts
+        if known.requirement == "" and incoming.requirement != "" then known.requirement = incoming.requirement
+        return false
+    end for
+    globals.vulns[fingerprint].push(incoming)
+    return true
+end function
+
+
+remember_fingerprint = function(library, version)
+    fingerprint = library + "@" + version
+    globals.vuln_meta[fingerprint] = [library, version]
+    if not globals.vulns.hasIndex(fingerprint) then globals.vulns[fingerprint] = []
+    return fingerprint
+end function
+
+
+load_vuln_content = function(content)
+    if typeof(content).lower != "string" then return 0
+    loaded = 0
+    for line in content.replace(char(13), "").split(char(10))
+        parts = line.trim.split("[|]")
+        if parts.len < 3 then continue
+        if parts[0] == "S" then
+            globals.vuln_scanned[parts[1] + "@" + parts[2]] = 1
+            remember_fingerprint(parts[1], parts[2])
+            continue
+        end if
+        if parts[0] != "V" or parts.len < 11 then continue
+        score = parts[7].to_int
+        hits = parts[8].to_int
+        attempts = parts[9].to_int
+        if typeof(score).lower != "number" then score = 0
+        if typeof(hits).lower != "number" then hits = 0
+        if typeof(attempts).lower != "number" then attempts = 0
+        source = "-"
+        if parts.len >= 12 then source = parts[11]
+        fingerprint = remember_fingerprint(parts[1], parts[2])
+        incoming = {"lib": parts[1], "version": parts[2], "region": parts[3],
+            "unsafe": parts[4], "mode": parts[5], "requirement": parts[6],
+            "score": score, "hits": hits, "attempts": attempts,
+            "last_kind": parts[10], "source": source,}
+        if merge_vuln(fingerprint, incoming) then loaded = loaded + 1
+    end for
+    return loaded
+end function
+
+
+load_vuln_index = function()
+    globals.vuln_index = {}
+    file = globals.local_computer.File(VULN_DB_INDEX_PATH)
+    if not is_file(file) then return "missing"
+    content = file.get_content
+    if typeof(content).lower != "string" then return "unreadable"
+    lines = content.replace(char(13), "").split(char(10))
+    if lines.len == 0 or lines[0].trim != VULN_DB_INDEX_HEADER then return "incompatible"
+    for line in lines[1:]
+        parts = line.trim.split("[|]")
+        if parts.len < 7 or parts[0] != "B" then continue
+        count = parts[5].to_int
+        if typeof(count).lower != "number" then count = 0
+        key = parts[1] + "@V" + parts[2]
+        globals.vuln_index[key] = {"lib": parts[1], "major": parts[2],
+            "folder": parts[3], "bucket": parts[4], "count": count, "source": parts[6],}
+    end for
+    return VULN_DB_INDEX_HEADER
+end function
+
+
+load_vuln_bucket = function(meta_lib)
+    bucket_key = vuln_bucket_key_values(meta_lib.lib_name, meta_lib.version)
+    if globals.vuln_loaded_buckets.hasIndex(bucket_key) then return 0
+    globals.vuln_loaded_buckets[bucket_key] = 1
+    folder = vuln_bucket_folder(meta_lib.lib_name, meta_lib.version)
+    if not is_file(folder) then return 0
+    count = 0
+    if globals.vuln_index.hasIndex(bucket_key) then count = globals.vuln_index[bucket_key].count
+    names = []
+    if count > 0 then
+        number = 1
+        while number <= count
+            names.push(vuln_shard_name(number))
+            number = number + 1
+        end while
+    else
+        files = folder.get_files
+        if typeof(files).lower == "list" then
+            for file in files
+                if file.name.indexOf(VULN_DB_SHARD_PREFIX) == 0 then add_unique(names, file.name)
+            end for
+        end if
+    end if
+    loaded = 0
+    for name in names
+        file = globals.local_computer.File(join_path(folder.path, name))
+        if is_file(file) then loaded = loaded + load_vuln_content(file.get_content)
+    end for
+    diag("vuln bucket load | bucket=" + bucket_key + " | entries=" + loaded)
+    return loaded
+end function
+
+
+mark_vuln_dirty = function(fingerprint)
+    globals.vuln_dirty = true
+    globals.vuln_dirty_fingerprints[fingerprint] = 1
+end function
+
+
+scan_vulnerabilities = function(provider, meta_lib)
+    fingerprint = vuln_fingerprint(meta_lib)
+    load_vuln_bucket(meta_lib)
+    remember_fingerprint(meta_lib.lib_name, str(meta_lib.version))
+    if globals.vuln_scanned.hasIndex(fingerprint) then return globals.vulns[fingerprint]
+    if not LEARN_UNKNOWN_LIBRARIES then return globals.vulns[fingerprint]
+
+    regions = provider.scan(meta_lib)
+    if typeof(regions).lower != "list" then return globals.vulns[fingerprint]
+    for region in regions
+        scan_text = provider.scan_address(meta_lib, region)
+        if typeof(scan_text).lower != "string" then continue
+        pieces = scan_text.split("Unsafe check: ")
+        if pieces.len < 2 then continue
+        for piece in pieces[1:]
+            start = piece.indexOf("<b>")
+            finish = piece.indexOf("</b>")
+            if start == null or finish == null or finish <= start + 3 then continue
+            unsafe = piece[start + 3:finish].replace(char(10), "").trim
+            if unsafe == "" then continue
+            requirement = piece[finish + 4:].replace("<b>", "").replace("</b>", "")
+            requirement = requirement.replace("<color=red>", "").replace("</color>", "")
+            requirement = requirement.replace(char(10), " ").trim
+            while requirement.indexOf("  ") != null
+                requirement = requirement.replace("  ", " ")
+            end while
+            incoming = {"lib": meta_lib.lib_name, "version": str(meta_lib.version),
+                "region": region, "unsafe": unsafe, "mode": vuln_mode(requirement),
+                "requirement": requirement, "score": 0, "hits": 0,
+                "attempts": 0, "last_kind": "untried", "source": VULN_DB_SOURCE,}
+            merge_vuln(fingerprint, incoming)
+        end for
+    end for
+    globals.vuln_scanned[fingerprint] = 1
+    mark_vuln_dirty(fingerprint)
+    diag("vuln scan | library=" + fingerprint + " | entries=" + globals.vulns[fingerprint].len)
+    return globals.vulns[fingerprint]
+end function
+
+
+ordered_vulns = function(entries)
+    ordered = []
+    for floor_score in [90, 70, 50, 1, -1000]
+        for entry in entries
+            if floor_score == 90 and entry.score >= 90 then ordered.push(entry)
+            if floor_score == 70 and entry.score >= 70 and entry.score < 90 then ordered.push(entry)
+            if floor_score == 50 and entry.score >= 50 and entry.score < 70 then ordered.push(entry)
+            if floor_score == 1 and entry.score > 0 and entry.score < 50 then ordered.push(entry)
+            if floor_score == -1000 and entry.score <= 0 then ordered.push(entry)
+        end for
+    end for
+    return ordered
+end function
+
+
+requirement_ready = function(entry, session, target_lan = "")
+    if entry.mode == "lan" and target_lan == "" then return false
+    lowered = entry.requirement.lower
+    if lowered.indexOf("root active") != null or lowered.indexOf("active root") != null then
+        if not session.is_root_active_user then return false
+    end if
+    if lowered.indexOf("active user") != null then
+        if not session.is_any_active_user then return false
+    end if
+    return true
+end function
+
+
+record_vuln_result = function(entry, result)
+    entry.attempts = entry.attempts + 1
+    kind = typeof(result).lower
+    entry.last_kind = kind
+    level = access_level(result)
+    score = 0
+    if is_exploit_object(result) then entry.hits = entry.hits + 1
+    if level == "root" then
+        score = 100
+    else if level == "user" then
+        score = 70
+    else if kind == "shell" then
+        score = 50
+    else if kind == "file" then
+        score = 30
+    else if kind == "computer" then
+        score = 35
+    else if kind == "number" then
+        score = 10
+    end if
+    if score > entry.score then entry.score = score
+    mark_vuln_dirty(entry.lib + "@" + entry.version)
+end function
+
+
+vuln_line = function(entry)
+    source = VULN_DB_SOURCE
+    if entry.source != "" and entry.source != "-" then source = entry.source
+    return "V|" + db_field(entry.lib) + "|" + db_field(entry.version) + "|" +
+        db_field(entry.region) + "|" + db_field(entry.unsafe) + "|" +
+        db_field(entry.mode) + "|" + db_field(entry.requirement) + "|" +
+        entry.score + "|" + entry.hits + "|" + entry.attempts + "|" +
+        db_field(entry.last_kind) + "|" + db_field(source)
+end function
+
+
+write_vuln_bucket = function(bucket_key)
+    bucket_parts = bucket_key.split("@V")
+    if bucket_parts.len < 2 then return null
+    library = bucket_parts[0]
+    major = bucket_parts[1]
+    folder = vuln_bucket_folder(library, major + ".0.0", true)
+    if not is_file(folder) then return null
+
+    old_count = 0
+    if globals.vuln_index.hasIndex(bucket_key) then old_count = globals.vuln_index[bucket_key].count
+    number = 1
+    lines = ["ACVDB3"]
+    size = 7
+    for fingerprint in globals.vuln_meta.indexes
+        meta = globals.vuln_meta[fingerprint]
+        if vuln_bucket_key_values(meta[0], meta[1]) != bucket_key then continue
+        scan_line = "S|" + db_field(meta[0]) + "|" + db_field(meta[1])
+        if size + scan_line.len + 1 > VULN_DB_SHARD_LIMIT and lines.len > 1 then
+            file = touch_file(folder, vuln_shard_name(number))
+            if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return null
+            number = number + 1
+            lines = ["ACVDB3"]
+            size = 7
+        end if
+        lines.push(scan_line)
+        size = size + scan_line.len + 1
+        if globals.vulns.hasIndex(fingerprint) then
+            for entry in globals.vulns[fingerprint]
+                line = vuln_line(entry)
+                if size + line.len + 1 > VULN_DB_SHARD_LIMIT and lines.len > 1 then
+                    file = touch_file(folder, vuln_shard_name(number))
+                    if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return null
+                    number = number + 1
+                    lines = ["ACVDB3", scan_line]
+                    size = 7 + scan_line.len + 1
+                end if
+                lines.push(line)
+                size = size + line.len + 1
+            end for
+        end if
+    end for
+    file = touch_file(folder, vuln_shard_name(number))
+    if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return null
+    retired = number + 1
+    while retired <= old_count
+        old_file = globals.local_computer.File(join_path(folder.path, vuln_shard_name(retired)))
+        if is_file(old_file) then old_file.delete
+        retired = retired + 1
+    end while
+    globals.vuln_index[bucket_key] = {"lib": library, "major": major,
+        "folder": path_component(library), "bucket": "V" + major,
+        "count": number, "source": VULN_DB_SOURCE,}
+    return number
+end function
+
+
+save_vulns = function()
+    if not globals.vuln_dirty then return true
+    dirty_buckets = {}
+    for fingerprint in globals.vuln_dirty_fingerprints.indexes
+        if not globals.vuln_meta.hasIndex(fingerprint) then continue
+        meta = globals.vuln_meta[fingerprint]
+        dirty_buckets[vuln_bucket_key_values(meta[0], meta[1])] = 1
+    end for
+    for bucket_key in dirty_buckets.indexes
+        if typeof(write_vuln_bucket(bucket_key)).lower != "number" then return false
+    end for
+    index = touch_file(globals.vuln_folder, "index.txt")
+    if not is_file(index) then return false
+    lines = [VULN_DB_INDEX_HEADER]
+    for bucket_key in globals.vuln_index.indexes
+        entry = globals.vuln_index[bucket_key]
+        lines.push("B|" + db_field(entry.lib) + "|" + db_field(entry.major) + "|" +
+            db_field(entry.folder) + "|" + db_field(entry.bucket) + "|" +
+            entry.count + "|" + db_field(entry.source))
+    end for
+    if index.set_content(lines.join(char(10))) != 1 then return false
+    globals.vuln_dirty = false
+    globals.vuln_dirty_fingerprints = {}
+    diag("vuln db save complete | buckets=" + dirty_buckets.indexes.len)
+    return true
+end function
+
+
+init_vulns = function()
+    globals.vulns = {}
+    globals.vuln_meta = {}
+    globals.vuln_scanned = {}
+    globals.vuln_loaded_buckets = {}
+    globals.vuln_dirty = false
+    globals.vuln_dirty_fingerprints = {}
+    state = load_vuln_index
+    if state != VULN_DB_INDEX_HEADER then
+        index = touch_file(globals.vuln_folder, "index.txt")
+        if is_file(index) then index.set_content(VULN_DB_INDEX_HEADER)
+    end if
+    diag("vuln db ready | schema=" + VULN_DB_INDEX_HEADER + " | state=" + state)
+end function
+
+
+service_protocol = function(meta_lib)
+    if not is_meta_lib(meta_lib) then return ""
+    name = meta_lib.lib_name.lower
+    if name.indexOf("ssh") != null then return "ssh"
+    if name.indexOf("ftp") != null then return "ftp"
+    return ""
+end function
+
+
+endpoint_exists = function(endpoints, ip, port)
+    for endpoint in endpoints
+        if endpoint.ip == ip and endpoint.port == port then return true
+    end for
+    return false
+end function
+
+
+discover_endpoints = function(ip, requested_port = -1, expected_lan = "")
+    endpoints = []
+    // Negative means the operator omitted the port and wants discovery.
+    // Zero is a real public router-control endpoint in Grey Hack.
+    if requested_port >= 0 then
+        info = "operator-selected"
+        if requested_port == 0 then info = "operator-selected router control"
+        endpoints.push({"ip": ip, "port": requested_port,
+            "lan": expected_lan, "info": info,})
+        return endpoints
+    end if
+
+    router = get_router(ip)
+    if typeof(router).lower != "router" then return endpoints
+    used = router.used_ports
+    if typeof(used).lower == "list" then
+        for port_object in used
+            if typeof(port_object).lower != "port" then continue
+            port = port_object.port_number
+            if endpoint_exists(endpoints, ip, port) then continue
+            info = router.port_info(port_object)
+            if typeof(info).lower != "string" then info = "unknown"
+            endpoints.push({"ip": ip, "port": port, "lan": expected_lan, "info": info})
+        end for
+    end if
+
+    // Port zero is the router control plane. Keep it last so forwarded services
+    // get the first chance to return a machine shell rather than a router shell.
+    if not endpoint_exists(endpoints, ip, 0) then
+        endpoints.push({"ip": ip, "port": 0, "lan": expected_lan, "info": "router control"})
+    end if
+    return endpoints
+end function
+
+
+add_computer_users = function(users, value)
+    root = root_from_value(value)
+    if not is_file(root) then return
+
+    home = file_from_root(root, "/home")
+    if is_file(home) then
+        folders = home.get_folders
+        if typeof(folders).lower == "list" then
+            for folder in folders
+                if users.len >= 16 then return
+                add_unique(users, folder.name)
+            end for
+        end if
+    end if
+
+    passwd = file_from_root(root, "/etc/passwd")
+    if not is_file(passwd) or not passwd.has_permission("r") then return
+    content = passwd.get_content
+    if typeof(content).lower != "string" then return
+    for line in content.split(char(10))
+        if users.len >= 16 then return
+        fields = line.trim.split(":")
+        if fields.len < 2 then continue
+        add_unique(users, fields[0].trim)
+    end for
+end function
+
+
+shell_score = function(value)
+    if not is_shell(value) then return 0
+    level = access_level(value)
+    if level == "root" then return 100
+    if level == "user" then return 70
+    return 50
+end function
+
+
+shell_matches_target = function(shell, public_ip, local_ip = "")
+    if not is_shell(shell) then return false
+    computer = shell.host_computer
+    if not is_computer(computer) then return false
+    if computer.public_ip != public_ip then return false
+    if local_ip != "" and computer.local_ip != local_ip then return false
+    return true
+end function
+
+
+root_shell_valid = function(shell, public_ip, local_ip = "")
+    if not shell_matches_target(shell, public_ip, local_ip) then return false
+    return access_level(shell) == "root"
+end function
+
+
+credential_key = function(ip, local_ip = "")
+    if local_ip == "" then return ip
+    return ip + "|" + local_ip
+end function
+
+
+connect_root = function(ip, port, password, protocol, local_ip = "")
+    if protocol == "" then return null
+    if typeof(password).lower != "string" or password == "" then return null
+    shell = globals.local_shell.connect_service(ip, port, "root", password, protocol)
+    if not root_shell_valid(shell, ip, local_ip) then return null
+    return shell
+end function
+
+
+remember_root_password = function(ip, value, local_ip = "")
+    key = credential_key(ip, local_ip)
+    if globals.network_root_passwords.hasIndex(key) then
+        return globals.network_root_passwords[key]
+    end if
+    password = decipher_root_password(value)
+    if typeof(password).lower != "string" or password == "" then return ""
+    globals.network_root_passwords[key] = password
+    target = ip
+    if local_ip != "" then target = target + "/" + local_ip
+    diag("root credential recovered | host=" + target + " | password=masked")
+    return password
+end function
+
+
+poison_source_for = function(library_name)
+    if typeof(library_name).lower != "string" or library_name == "" then return null
+    source = globals.local_computer.File(join_path(POISON_LIB_ROOT, library_name))
+    if not is_file(source) or source.is_folder or not source.is_binary then return null
+    return source
+end function
+
+
+poison_library_names = function()
+    names = []
+    folder = globals.local_computer.File(POISON_LIB_ROOT)
+    if not is_file(folder) or not folder.is_folder then return names
+    files = folder.get_files
+    if typeof(files).lower != "list" then return names
+    for file in files
+        if file.is_folder or not file.is_binary then continue
+        add_unique(names, file.name)
+    end for
+    return names
+end function
+
+
+promotion_authority_ready = function(value)
+    if not is_file(value) and not is_computer(value) then return false
+    if access_level(value) != "root" then return false
+    root = root_from_value(value)
+    if not is_file(root) then return false
+    lib_folder = file_from_root(root, "/lib")
+    bin_folder = file_from_root(root, "/bin")
+    if not is_file(lib_folder) or not lib_folder.is_folder then return false
+    if not is_file(bin_folder) or not bin_folder.is_folder then return false
+    if not lib_folder.has_permission("w") then return false
+    if not bin_folder.has_permission("w") then return false
+    return true
+end function
+
+
+remember_promotion_authority = function(result, value)
+    if not promotion_authority_ready(value) then return
+    current = result.root_object
+    if typeof(current).lower == "null" then
+        result.root_object = value
+        return
+    end if
+    // Prefer a Computer because its host identity is directly inspectable. A
+    // root File remains valid promotion authority when it is the only object.
+    if is_computer(value) and is_file(current) then result.root_object = value
+end function
+
+
+remote_promotion_stage = function(remote_shell)
+    work = writable_folder(remote_shell)
+    if not is_file(work) then return null
+    computer = remote_shell.host_computer
+    stage_name = ".autohack-promote-" + globals.poison_attempts
+    stage_path = join_path(work.path, stage_name)
+    stage = computer.File(stage_path)
+    if not is_file(stage) then
+        if computer.create_folder(work.path, stage_name) != 1 then return null
+        stage = computer.File(stage_path)
+    end if
+    if not is_file(stage) or not stage.is_folder then return null
+    if not stage.has_permission("w") or not stage.has_permission("x") then return null
+    return stage
+end function
+
+
+remove_remote_promotion_stage = function(remote_shell, stage)
+    if not is_shell(remote_shell) or not is_file(stage) then return
+    files = stage.get_files
+    if typeof(files).lower == "list" then
+        for file in files
+            file.delete
+        end for
+    end if
+    folders = stage.get_folders
+    if typeof(folders).lower == "list" then
+        for folder in folders
+            folder.delete
+        end for
+    end if
+    stage.delete
+end function
+
+
+promote_exact_endpoint = function(endpoint, meta_lib, attack_result)
+    outcome = {"eligible": false, "attempted": false, "rebooted": false,
+        "status": "not-eligible", "result": null, "library": "",}
+    if not globals.poison_auto then
+        outcome.status = "automatic promotion disabled"
+        return outcome
+    end if
+    if attack_result.score <= 0 or attack_result.score >= 100 then return outcome
+    if not is_shell(attack_result.shell) then return outcome
+    if not shell_matches_target(attack_result.shell, endpoint.ip, endpoint.lan) then return outcome
+    if not promotion_authority_ready(attack_result.root_object) then return outcome
+    if not is_meta_lib(meta_lib) then return outcome
+
+    library_name = meta_lib.lib_name
+    outcome.library = library_name
+    outcome.eligible = true
+    source = poison_source_for(library_name)
+    if not is_file(source) then
+        outcome.status = "matching poison library unavailable"
+        globals.poison_last = library_name + " | unavailable"
+        show_auto_action("POISON SKIPPED", library_name + " not found in " + POISON_LIB_ROOT, COLOR_ORANGE)
+        diag("poison promotion skipped | host=" + endpoint.ip + ":" + endpoint.port +
+            " | library=" + library_name + " | reason=source-unavailable")
+        return outcome
+    end if
+    reboot_source = globals.local_computer.File(REBOOT_SOURCE)
+    if not is_file(reboot_source) or reboot_source.is_folder or not reboot_source.is_binary then
+        outcome.status = "local reboot binary unavailable"
+        globals.poison_last = library_name + " | reboot source unavailable"
+        show_auto_action("POISON SKIPPED", REBOOT_SOURCE + " unavailable", COLOR_RED)
+        diag("poison promotion skipped | host=" + endpoint.ip + ":" + endpoint.port +
+            " | library=" + library_name + " | reason=reboot-source-unavailable")
+        return outcome
+    end if
+
+    globals.poison_attempts = globals.poison_attempts + 1
+    outcome.attempted = true
+    globals.poison_last = library_name + " | staging"
+    show_auto_action("POISON PROMOTION", library_name + " | exact endpoint", COLOR_ORANGE)
+    diag("poison promotion start | host=" + endpoint.ip + ":" + endpoint.port +
+        " | lan=" + endpoint.lan + " | library=" + library_name +
+        " | authority=" + typeof(attack_result.root_object).lower)
+
+    stage = remote_promotion_stage(attack_result.shell)
+    if not is_file(stage) then
+        outcome.status = "remote staging unavailable"
+        globals.poison_last = library_name + " | staging failed"
+        show_auto_action("POISON FAILED", outcome.status, COLOR_RED)
+        diag("poison promotion failed | host=" + endpoint.ip + ":" + endpoint.port +
+            " | library=" + library_name + " | reason=remote-staging-unavailable")
+        return outcome
+    end if
+
+    poison_copy = globals.local_shell.scp(source.path, stage.path, attack_result.shell)
+    reboot_copy = globals.local_shell.scp(REBOOT_SOURCE, stage.path, attack_result.shell)
+    staged_poison_path = join_path(stage.path, source.name)
+    staged_reboot_path = join_path(stage.path, reboot_source.name)
+    authority_root = root_from_value(attack_result.root_object)
+    staged_poison = file_from_root(authority_root, staged_poison_path)
+    staged_reboot = file_from_root(authority_root, staged_reboot_path)
+    if poison_copy != 1 or reboot_copy != 1 or not is_file(staged_poison) or
+        not is_file(staged_reboot) then
+        outcome.status = "payload transfer failed"
+        globals.poison_last = library_name + " | transfer failed"
+        show_auto_action("POISON FAILED", outcome.status, COLOR_RED)
+        diag("poison promotion failed | host=" + endpoint.ip + ":" + endpoint.port +
+            " | library=" + library_name + " | reason=payload-transfer-failed" +
+            " | poison_copy=" + poison_copy + " | reboot_copy=" + reboot_copy)
+        remove_remote_promotion_stage(attack_result.shell, stage)
+        return outcome
+    end if
+
+    lib_copy = staged_poison.copy("/lib", library_name)
+    reboot_install = staged_reboot.copy("/bin", "reboot")
+    installed_lib = file_from_root(authority_root, "/lib/" + library_name)
+    installed_reboot = file_from_root(authority_root, "/bin/reboot")
+    if lib_copy != 1 or reboot_install != 1 or not is_file(installed_lib) or
+        not is_file(installed_reboot) then
+        outcome.status = "root installation failed"
+        globals.poison_last = library_name + " | install failed"
+        show_auto_action("POISON FAILED", outcome.status, COLOR_RED)
+        diag("poison promotion failed | host=" + endpoint.ip + ":" + endpoint.port +
+            " | library=" + library_name + " | reason=root-installation-failed" +
+            " | lib_copy=" + lib_copy + " | reboot_install=" + reboot_install)
+        remove_remote_promotion_stage(attack_result.shell, stage)
+        return outcome
+    end if
+
+    remove_remote_promotion_stage(attack_result.shell, stage)
+    show_auto_action("POISON INSTALLED", "/lib/" + library_name + " + /bin/reboot", COLOR_GREEN)
+    diag("poison installed | host=" + endpoint.ip + ":" + endpoint.port +
+        " | lan=" + endpoint.lan + " | library=/lib/" + library_name +
+        " | reboot=/bin/reboot")
+
+    // The Computer API is the authority-bearing reboot path used by 5hell.
+    // /bin/reboot is installed first because current routers may not expose a
+    // commandable reboot until the binary exists on the target filesystem.
+    clean_execution_route
+    show_auto_action("TARGET REBOOT", endpoint.ip + " | waiting " +
+        POISON_REBOOT_WAIT_SECONDS + "s", COLOR_ORANGE)
+    attack_result.shell.host_computer.reboot
+    outcome.rebooted = true
+    globals.poison_last = library_name + " | rebooted; reacquiring"
+    wait(POISON_REBOOT_WAIT_SECONDS)
+
+    fresh = attack_endpoint(endpoint, false)
+    fresh.risk = true
+    fresh.promoted = true
+    fresh.promotion = "rebooted and reacquired"
+    outcome.result = fresh
+    if fresh.score > 0 then
+        globals.poison_successes = globals.poison_successes + 1
+        globals.poison_last = library_name + " | access reacquired"
+        outcome.status = "access reacquired"
+        show_auto_action("POISON REACQUIRED", access_level(fresh.shell) + " shell", COLOR_GREEN)
+        diag("poison promotion complete | host=" + endpoint.ip + ":" + endpoint.port +
+            " | lan=" + endpoint.lan + " | library=" + library_name +
+            " | authority=" + access_level(fresh.shell))
+    else
+        globals.poison_last = library_name + " | reacquisition failed"
+        outcome.status = "reacquisition failed"
+        show_auto_action("POISON REACQUIRE FAILED", "endpoint remains changed", COLOR_RED)
+        diag("poison promotion failed | host=" + endpoint.ip + ":" + endpoint.port +
+            " | lan=" + endpoint.lan + " | library=" + library_name +
+            " | reason=reacquisition-failed | residual_risk=yes")
+    end if
+    return outcome
+end function
+
+
+reconnect_injected = function(endpoint, meta_lib, session, objects)
+    protocol = service_protocol(meta_lib)
+    if protocol == "" then return null
+
+    users = []
+    if session.is_root_active_user then add_unique(users, "root")
+    for value in objects
+        add_computer_users(users, value)
+    end for
+    if session.is_any_active_user then add_unique(users, "guest")
+
+    best = null
+    best_score = 0
+    for user in users
+        connected = globals.local_shell.connect_service(
+            endpoint.ip,
+            endpoint.port,
+            user,
+            ROOT_PASSWORD_INJECT,
+            protocol)
+        score = shell_score(connected)
+        if not shell_matches_target(connected, endpoint.ip, endpoint.lan) then score = 0
+        if score > best_score then
+            best = connected
+            best_score = score
+        end if
+        if score == 100 then return connected
+    end for
+    return best
+end function
+
+
+attack_endpoint = function(endpoint, allow_promotion = true)
+    result = {"shell": null, "score": 0, "objects": [], "risk": false,
+        "fingerprint": "", "reason": "access exhausted", "root_object": null,
+        "promoted": false, "promotion": "not-attempted",}
+
+    endpoint_label = endpoint.ip + ":" + endpoint.port
+    if endpoint.lan != "" then endpoint_label = endpoint_label + " -> " + endpoint.lan
+    show_auto_action("ENDPOINT PROBE", endpoint_label, COLOR_PURPLE)
+
+    if endpoint.port == 0 then
+        session = globals.metaxploit.net_use(endpoint.ip)
+    else
+        session = globals.metaxploit.net_use(endpoint.ip, endpoint.port)
+    end if
+    if not is_session(session) then
+        result.reason = "net_use failed"
+        show_auto_action("ENDPOINT REJECTED", result.reason, COLOR_RED)
+        return result
+    end if
+
+    meta_lib = session.dump_lib
+    if not is_meta_lib(meta_lib) then
+        result.reason = "service library unavailable"
+        show_auto_action("ENDPOINT REJECTED", result.reason, COLOR_RED)
+        return result
+    end if
+
+    result.fingerprint = vuln_fingerprint(meta_lib)
+    show_auto_action("LIBRARY READY", result.fingerprint, COLOR_PURPLE)
+    protocol = service_protocol(meta_lib)
+    key = credential_key(endpoint.ip, endpoint.lan)
+    if protocol != "" and globals.network_root_passwords.hasIndex(key) then
+        show_auto_action("ROOT RECONNECT", endpoint_label, COLOR_ORANGE)
+        known = connect_root(
+            endpoint.ip,
+            endpoint.port,
+            globals.network_root_passwords[key],
+            protocol,
+            endpoint.lan)
+        if is_shell(known) then
+            result.shell = known
+            result.score = 100
+            result.reason = "known root credential reused"
+            show_auto_action("ACCESS RETAINED", "root | known credential", COLOR_GREEN)
+            return result
+        end if
+        show_auto_action("ROOT RECONNECT MISSED", "continuing exploit sequence", COLOR_RED)
+    end if
+
+    entries = scan_vulnerabilities(globals.metaxploit, meta_lib)
+    diag("vuln use | host=" + endpoint.ip + ":" + endpoint.port +
+        " | library=" + result.fingerprint + " | entries=" + entries.len)
+    if entries.len == 0 then
+        result.reason = "no vulnerability entries"
+        show_auto_action("ATTACK SKIPPED", result.reason, COLOR_RED)
+        return result
+    end if
+
+    password_changed = false
+    attempts = 0
+    for entry in ordered_vulns(entries)
+        if attempts >= MAX_RESULTS_PER_SERVICE then break
+        if not requirement_ready(entry, session, endpoint.lan) then continue
+
+        arguments = []
+        if entry.mode == "password" then arguments = [ROOT_PASSWORD_INJECT]
+        if entry.mode == "lan" then arguments = [endpoint.lan]
+        if entry.mode == "plain" then arguments = ["__AH_PLAIN__"]
+        if entry.mode == "unknown" then
+            arguments = [ROOT_PASSWORD_INJECT, "__AH_PLAIN__"]
+            if endpoint.lan != "" then
+                arguments = [endpoint.lan, ROOT_PASSWORD_INJECT, "__AH_PLAIN__"]
+            end if
+        end if
+
+        for argument in arguments
+            if attempts >= MAX_RESULTS_PER_SERVICE then break
+            attempts = attempts + 1
+            result.risk = true
+            attack_mode = "plain overflow"
+            if argument != "__AH_PLAIN__" then attack_mode = "credential payload"
+            show_attack_attempt(result.fingerprint, attempts, attack_mode)
+            if argument == "__AH_PLAIN__" then
+                overflow = meta_lib.overflow(entry.region, entry.unsafe)
+            else
+                overflow = meta_lib.overflow(entry.region, entry.unsafe, argument)
+            end if
+            record_vuln_result(entry, overflow)
+
+            if typeof(overflow).lower == "number" then password_changed = true
+            if is_exploit_object(overflow) then
+                result.objects.push(overflow)
+                globals.retained_results.push(overflow)
+                remember_promotion_authority(result, overflow)
+                score = shell_score(overflow)
+                target_match = true
+                if is_shell(overflow) then
+                    target_match = shell_matches_target(overflow, endpoint.ip, endpoint.lan)
+                    if not target_match then score = 0
+                end if
+                show_attack_result(overflow, target_match)
+                if score > result.score then
+                    result.shell = overflow
+                    result.score = score
+                end if
+                remember_root_password(endpoint.ip, overflow, endpoint.lan)
+                if entry.mode == "unknown" then
+                    if argument == "__AH_PLAIN__" then
+                        entry.mode = "plain"
+                    else if endpoint.lan != "" and argument == endpoint.lan then
+                        entry.mode = "lan"
+                    else
+                        entry.mode = "password"
+                    end if
+                end if
+                if score == 100 then
+                    result.reason = "direct root shell"
+                    return result
+                end if
+            else
+                show_attack_result(overflow)
+            end if
+        end for
+    end for
+
+    if protocol != "" and globals.network_root_passwords.hasIndex(key) then
+        root_shell = connect_root(
+            endpoint.ip,
+            endpoint.port,
+            globals.network_root_passwords[key],
+            protocol,
+            endpoint.lan)
+        if is_shell(root_shell) then
+            result.shell = root_shell
+            result.score = 100
+            result.reason = "deciphered root reconnect"
+            show_auto_action("ACCESS RETAINED", "root | deciphered credential", COLOR_GREEN)
+            return result
+        end if
+    end if
+
+    if password_changed then
+        injected = reconnect_injected(endpoint, meta_lib, session, result.objects)
+        injected_score = shell_score(injected)
+        if injected_score > result.score then
+            result.shell = injected
+            result.score = injected_score
+            globals.retained_results.push(injected)
+        end if
+        if is_shell(injected) then
+            password = remember_root_password(endpoint.ip, injected, endpoint.lan)
+            if password != "" then
+                root_shell = connect_root(endpoint.ip, endpoint.port, password, protocol, endpoint.lan)
+                if is_shell(root_shell) then
+                    result.shell = root_shell
+                    result.score = 100
+                    result.reason = "injected user escalated to root"
+                    show_auto_action("ACCESS RETAINED", "root | injected escalation", COLOR_GREEN)
+                    return result
+                end if
+            end if
+        end if
+    end if
+
+    if allow_promotion and result.score > 0 and result.score < 100 and
+        promotion_authority_ready(result.root_object) then
+        promotion = promote_exact_endpoint(endpoint, meta_lib, result)
+        result.promotion = promotion.status
+        if promotion.rebooted and typeof(promotion.result).lower == "map" then
+            return promotion.result
+        end if
+    end if
+
+    if result.score > 0 then
+        result.reason = access_level(result.shell) + " shell retained"
+        show_auto_action("ACCESS RETAINED", result.reason, COLOR_GREEN)
+    else
+        show_auto_action("ACCESS EXHAUSTED", attempts + " attempt(s)", COLOR_RED)
+    end if
+    return result
+end function
+
+
+retry_known_root = function(endpoints, ip, local_ip = "")
+    key = credential_key(ip, local_ip)
+    if not globals.network_root_passwords.hasIndex(key) then return null
+    password = globals.network_root_passwords[key]
+    for endpoint in endpoints
+        if endpoint.port == 0 then continue
+        session = globals.metaxploit.net_use(endpoint.ip, endpoint.port)
+        if not is_session(session) then continue
+        meta_lib = session.dump_lib
+        protocol = service_protocol(meta_lib)
+        if protocol == "" then continue
+        shell = connect_root(endpoint.ip, endpoint.port, password, protocol, local_ip)
+        if is_shell(shell) then return shell
+    end for
+    return null
+end function
+
+
+clean_execution_route = function()
+    computer_ok = clean_source(globals.execution_computer_source)
+    router_ok = clean_source(globals.execution_router_source)
+    if computer_ok and router_ok then
+        diag("execution logs clean | computer=yes | router=yes")
+        return true
+    end if
+    diag("execution log cleanup failed | computer=" + computer_ok + " | router=" + router_ok)
+    return false
+end function
+
+
+prepare_execution_cleanup = function()
+    globals.execution_computer_source = stage_clean_source(globals.local_shell)
+    globals.execution_router_source = stage_local_router_source
+    computer_ready = is_file(globals.execution_computer_source)
+    router_ready = is_file(globals.execution_router_source)
+    bridge = get_custom_object
+    diag("execution cleanup staged | host=" + globals.local_computer.public_ip + "/" +
+        globals.local_computer.local_ip + " | computer=" + computer_ready + " | router=" + router_ready +
+        " | router_attempts=" + bridge.an_router_attempts +
+        " | router_objects=" + bridge.an_router_objects +
+        " | router_detail=" + bridge.an_router_detail)
+    if not computer_ready then return false
+    if REQUIRE_EXECUTION_ROUTER_CLEAN and not router_ready then return false
+    return true
+end function
+
+
+stage_target_cleanup = function(shell)
+    computer_source = stage_clean_source(shell)
+    router_stage = stage_remote_router_source(shell)
+    router_source = router_stage.source
+    helper_path = router_stage.helper
+    provider_path = router_stage.provider
+    delete_remote_artifact(shell, helper_path)
+    if router_stage.provider_owned then delete_remote_artifact(shell, provider_path)
+    helper_path = ""
+    provider_path = ""
+
+    computer_ready = is_file(computer_source)
+    router_ready = is_file(router_source)
+    computer = shell.host_computer
+    diag("target cleanup staged | host=" + computer.public_ip + "/" + computer.local_ip +
+        " | computer=" + computer_ready + " | router=" + router_ready +
+        " | router_attempts=" + router_stage.attempts +
+        " | router_objects=" + router_stage.objects +
+        " | helper_status=" + router_stage.status +
+        " | router_detail=" + router_stage.detail)
+    return {"computer": computer_source, "router": router_source,
+        "computer_ready": computer_ready, "router_ready": router_ready,}
+end function
+
+
+cleanup_target = function(staged)
+    computer_ok = clean_source(staged.computer)
+    router_ok = clean_source(staged.router)
+    diag("target cleanup complete | computer=" + computer_ok + " | router=" + router_ok)
+    return {"computer": computer_ok, "router": router_ok}
+end function
+
+
+remember_access_session = function(shell, staged, authority, promoted = false, promotion = "not-attempted")
+    if not is_shell(shell) then return -1
+    computer = shell.host_computer
+    while globals.access_sessions.len >= MAX_ACCESS_SESSIONS
+        globals.access_sessions.remove(0)
+    end while
+    globals.access_sessions.push({
+        "shell": shell,
+        "staged": staged,
+        "public_ip": computer.public_ip,
+        "local_ip": computer.local_ip,
+        "authority": authority,
+        "promoted": promoted,
+        "promotion": promotion,
+        "router_ready": staged.router_ready,
+        "state": "ready",
+        "uses": 0,
+        "retained": current_date,
+        "last_computer_clean": true,
+        "last_router_clean": staged.router_ready,
+        "last_execution_clean": true,})
+    index = globals.access_sessions.len - 1
+    globals.active_session = index
+    return index
+end function
+
+
+run_target = function(ip, requested_port = -1, expected_lan = "")
+    if not prepare_execution_cleanup then
+        diag("target refused | reason=execution cleanup unavailable")
+        flush_log
+        return false
+    end if
+    clean_execution_route
+
+    endpoints = discover_endpoints(ip, requested_port, expected_lan)
+    if endpoints.len == 0 then
+        diag("target refused | host=" + ip + " | reason=no endpoints")
+        flush_log
+        clean_execution_route
+        return false
+    end if
+
+    print(char(10) + paint("AutoHack target", COLOR_PURPLE))
+    print("Public IP: " + paint(ip, COLOR_CYAN))
+    print("Endpoints: " + paint(endpoints.len, COLOR_GREEN))
+    if expected_lan != "" then
+        print("Exact LAN machine: " + paint(expected_lan, COLOR_CYAN))
+    end if
+    diag("target start | host=" + ip + " | endpoints=" + endpoints.len +
+        " | requested_port=" + requested_port + " | requested_lan=" + expected_lan)
+
+    best_shell = null
+    best_score = 0
+    best_promoted = false
+    best_promotion = "not-attempted"
+    risky_endpoints = 0
+    for endpoint in endpoints
+        print(char(10) + paint("Endpoint ", COLOR_PURPLE) +
+            paint(endpoint.ip + ":" + endpoint.port, COLOR_CYAN) + "  " + endpoint.info)
+        attack = attack_endpoint(endpoint)
+        if attack.risk then risky_endpoints = risky_endpoints + 1
+        if attack.score > best_score then
+            best_shell = attack.shell
+            best_score = attack.score
+            best_promoted = attack.promoted
+            best_promotion = attack.promotion
+        end if
+        if attack.score == 100 then break
+    end for
+
+    if best_score < 100 then
+        root_retry = retry_known_root(endpoints, ip, expected_lan)
+        if is_shell(root_retry) then
+            best_shell = root_retry
+            best_score = 100
+            best_promoted = false
+            best_promotion = "known root retry"
+        end if
+    end if
+
+    if not is_shell(best_shell) then
+        globals.retained_results = []
+        save_vulns
+        diag("target failed | host=" + ip + " | residual_risk_endpoints=" + risky_endpoints +
+            " | reason=no usable shell")
+        flush_log
+        wait(FINALIZER_WAIT_SECONDS)
+        clean_execution_route
+        return false
+    end if
+
+    authority = access_level(best_shell)
+    target_computer = best_shell.host_computer
+    if expected_lan != "" and target_computer.local_ip != expected_lan then
+        globals.retained_results = []
+        best_shell = null
+        save_vulns
+        diag("target refused | host=" + ip + " | requested_lan=" + expected_lan +
+            " | reason=returned shell belongs to another LAN machine")
+        flush_log
+        wait(FINALIZER_WAIT_SECONDS)
+        clean_execution_route
+        return false
+    end if
+    staged = stage_target_cleanup(best_shell)
+    if not staged.computer_ready then
+        globals.retained_results = []
+        best_shell = null
+        save_vulns
+        diag("target refused | host=" + ip + " | reason=target computer cleanup unavailable")
+        flush_log
+        wait(FINALIZER_WAIT_SECONDS)
+        clean_source(staged.computer)
+        clean_source(staged.router)
+        clean_execution_route
+        return false
+    end if
+    if REQUIRE_TARGET_ROUTER_CLEAN and not staged.router_ready then
+        globals.retained_results = []
+        best_shell = null
+        save_vulns
+        diag("target refused | host=" + ip + " | reason=target router cleanup unavailable")
+        flush_log
+        wait(FINALIZER_WAIT_SECONDS)
+        clean_source(staged.computer)
+        clean_source(staged.router)
+        clean_execution_route
+        return false
+    end if
+
+    globals.retained_results = []
+    save_vulns
+    diag("access ready | host=" + target_computer.public_ip + "/" +
+        target_computer.local_ip + " | authority=" + authority +
+        " | router_cleanup=" + staged.router_ready +
+        " | poison_promoted=" + best_promoted +
+        " | promotion=" + best_promotion)
+    flush_log
+
+    // Remove the helper upload/deletion and all exploit evidence before retaining
+    // the shell. Opening a target terminal is a separate operator action so a
+    // successful attack never unexpectedly replaces the AutoHack console.
+    wait(FINALIZER_WAIT_SECONDS)
+    initial_target = cleanup_target(staged)
+    initial_execution = clean_execution_route
+    if not initial_target.computer or not initial_execution then
+        best_shell = null
+        wait(FINALIZER_WAIT_SECONDS)
+        clean_source(staged.computer)
+        clean_source(staged.router)
+        clean_execution_route
+        print(paint("AutoHack refused to open an unclean access path.", COLOR_RED))
+        return false
+    end if
+
+    session_index = remember_access_session(
+        best_shell,
+        staged,
+        authority,
+        best_promoted,
+        best_promotion)
+    if session_index < 0 then
+        best_shell = null
+        print(paint("AutoHack could not retain the verified access object.", COLOR_RED))
+        return false
+    end if
+
+    print(char(10) + paint("ACCESS RETAINED", COLOR_GREEN) + " [" +
+        paint(session_index, COLOR_CYAN) + "]")
+    print("Host: " + paint(target_computer.public_ip, COLOR_CYAN) + "/" +
+        paint(target_computer.local_ip, COLOR_CYAN))
+    print("Authority: " + paint(authority, COLOR_PINK))
+    if best_promoted then
+        print("Poison promotion: " + paint(best_promotion, COLOR_GREEN))
+    end if
+    if not staged.router_ready then
+        print(paint("Target router cleanup is unavailable; the owned AutoRoute chain remains the break.", COLOR_ORANGE))
+    end if
+    if globals.autoshell then
+        print(paint("AutoShell is on; opening retained session " + session_index + ".", COLOR_PURPLE))
+        open_access_session(session_index)
+    else
+        print("Type " + paint("shell", COLOR_GREEN) + " or " +
+            paint("shell " + session_index, COLOR_GREEN) + " when you want the terminal.")
+    end if
+    return true
+end function
+
+
+selected_access_index = function()
+    if globals.access_sessions.len == 0 then
+        globals.active_session = -1
+        return -1
+    end if
+    index = globals.active_session
+    if typeof(index).lower != "number" or index < 0 or index >= globals.access_sessions.len then
+        index = globals.access_sessions.len - 1
+        globals.active_session = index
+    end if
+    return index
+end function
+
+
+session_state_color = function(state)
+    if state == "ready" then return COLOR_GREEN
+    return COLOR_RED
+end function
+
+
+console_prompt = function()
+    origin = globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+    selected = selected_access_index
+    top = paint("╭─◆ ", COLOR_PURPLE) + paint("AUTOHACK", COLOR_PURPLE) +
+        paint(" ◆─", COLOR_PURPLE)
+    if selected < 0 then
+        top = top + paint("[NO RETAINED TARGET]", COLOR_ORANGE)
+        bottom = paint("╰─", COLOR_PURPLE) + paint("ORIGIN ", COLOR_ORANGE) +
+            paint(origin, COLOR_CYAN) + paint(" ─▶ ", COLOR_GREEN)
+        return top + char(10) + bottom
+    end if
+
+    access = globals.access_sessions[selected]
+    top = top + paint("[S" + selected + "/" + globals.access_sessions.len + "]", COLOR_PINK) +
+        paint("─[" + access.authority.upper + "]", COLOR_PINK) +
+        paint("─[" + access.state.upper + "]", session_state_color(access.state))
+    bottom = paint("╰─", COLOR_PURPLE) + paint("ORIGIN ", COLOR_ORANGE) +
+        paint(origin, COLOR_CYAN) + paint(" ─▶ ", COLOR_GREEN) +
+        paint("TARGET ", COLOR_CYAN) +
+        paint(access.public_ip + "/" + access.local_ip, COLOR_CYAN) +
+        paint(" ─▶ ", COLOR_GREEN)
+    return top + char(10) + bottom
+end function
+
+
+show_location = function()
+    print(paint("AutoHack location", COLOR_PURPLE))
+    print("Execution origin: " + paint(globals.local_computer.public_ip, COLOR_CYAN) + "/" +
+        paint(globals.local_computer.local_ip, COLOR_CYAN))
+    selected = selected_access_index
+    if selected < 0 then
+        print(paint("No retained target is currently selected.", COLOR_ORANGE))
+        return
+    end if
+    access = globals.access_sessions[selected]
+    print("Selected session: [" + paint(selected, COLOR_PINK) + "] of " +
+        paint(globals.access_sessions.len, COLOR_GREEN))
+    print("Attached target: " + paint(access.public_ip, COLOR_CYAN) + "/" +
+        paint(access.local_ip, COLOR_CYAN))
+    print("Authority: " + paint(access.authority, COLOR_PINK))
+    print("State: " + paint(access.state, session_state_color(access.state)))
+    if access.promoted then
+        print("Poison promotion: " + paint(access.promotion, COLOR_GREEN))
+    end if
+    if access.router_ready then
+        print("Target router cleanup: " + paint("available", COLOR_GREEN))
+    else
+        print("Target router cleanup: " + paint("best effort unavailable", COLOR_ORANGE))
+    end if
+end function
+
+
+show_access_sessions = function()
+    print(paint("Retained access sessions", COLOR_PURPLE))
+    if globals.access_sessions.len == 0 then
+        print(paint("No verified access is currently retained.", COLOR_ORANGE))
+        return
+    end if
+    selected = selected_access_index
+    for index in range(0, globals.access_sessions.len - 1)
+        access = globals.access_sessions[index]
+        state_color = COLOR_GREEN
+        if access.state != "ready" then state_color = COLOR_RED
+        router_text = "clean"
+        router_color = COLOR_GREEN
+        if not access.router_ready then
+            router_text = "best-effort"
+            router_color = COLOR_ORANGE
+        end if
+        poison_text = "native"
+        poison_color = COLOR_PURPLE
+        if access.promoted then
+            poison_text = "promoted"
+            poison_color = COLOR_GREEN
+        end if
+        marker = " "
+        if index == selected then marker = paint("◆", COLOR_GREEN)
+        print(marker + "[" + paint(index, COLOR_CYAN) + "] " +
+            paint(access.public_ip, COLOR_CYAN) + "/" + paint(access.local_ip, COLOR_CYAN) +
+            "  " + paint(access.authority, COLOR_PINK) +
+            "  state=" + paint(access.state, state_color) +
+            "  router=" + paint(router_text, router_color) +
+            "  poison=" + paint(poison_text, poison_color) +
+            "  opens=" + access.uses)
+    end for
+end function
+
+
+open_access_session = function(index = -1)
+    if globals.access_sessions.len == 0 then
+        print(paint("No retained access session is available.", COLOR_RED))
+        return false
+    end if
+    if index < 0 then index = selected_access_index
+    if index >= globals.access_sessions.len then
+        print(paint("Session index is outside the retained-access list.", COLOR_RED))
+        return false
+    end if
+    globals.active_session = index
+
+    access = globals.access_sessions[index]
+    if not is_shell(access.shell) then
+        access.state = "invalid-shell"
+        print(paint("The retained shell object is no longer usable.", COLOR_RED))
+        return false
+    end if
+
+    // A retained shell may be opened more than once. Re-clean both sides before
+    // every launch so the terminal is never entered on top of stale evidence.
+    pre_target = cleanup_target(access.staged)
+    pre_execution = clean_execution_route
+    if not pre_target.computer or not pre_execution then
+        access.state = "preclean-failed"
+        access.last_computer_clean = pre_target.computer
+        access.last_router_clean = pre_target.router
+        access.last_execution_clean = pre_execution
+        print(paint("AutoHack refused to open a session whose pre-clean failed.", COLOR_RED))
+        return false
+    end if
+
+    print(char(10) + paint("OPENING SESSION", COLOR_GREEN) + " [" +
+        paint(index, COLOR_CYAN) + "]")
+    print("Host: " + paint(access.public_ip, COLOR_CYAN) + "/" +
+        paint(access.local_ip, COLOR_CYAN) + "  Authority: " +
+        paint(access.authority, COLOR_PINK))
+    print(paint("Close the target terminal to return to AutoHack and finalize logs.", COLOR_PURPLE))
+
+    access.shell.start_terminal
+    wait(FINALIZER_WAIT_SECONDS)
+
+    final_target = cleanup_target(access.staged)
+    diag("terminal finalizer | session=" + index + " | host=" + access.public_ip +
+        "/" + access.local_ip + " | computer=" + final_target.computer +
+        " | router=" + final_target.router)
+    flush_log
+    final_execution = clean_execution_route
+
+    access.uses = access.uses + 1
+    access.last_computer_clean = final_target.computer
+    access.last_router_clean = final_target.router
+    access.last_execution_clean = final_execution
+    if final_target.computer and final_execution then
+        access.state = "ready"
+    else
+        access.state = "cleanup-failed"
+    end if
+
+    print(char(10) + paint("AutoHack finalizer", COLOR_PURPLE))
+    print("Target computer: " + paint(final_target.computer, COLOR_GREEN))
+    if final_target.router then
+        print("Target router: " + paint("clean", COLOR_GREEN))
+    else
+        print("Target router: " + paint("best effort unavailable", COLOR_ORANGE))
+    end if
+    print("Execution route: " + paint(final_execution, COLOR_GREEN))
+    print(paint("Returned to the AutoHack console.", COLOR_CYAN))
+    return final_target.computer and final_execution
+end function
+
+
+scan_interesting_session = function(index = -1)
+    if globals.access_sessions.len == 0 then
+        print(paint("No retained access session is available.", COLOR_RED))
+        return false
+    end if
+    if index < 0 then index = selected_access_index
+    if index >= globals.access_sessions.len then
+        print(paint("Session index is outside the retained-access list.", COLOR_RED))
+        return false
+    end if
+    globals.active_session = index
+
+    access = globals.access_sessions[index]
+    if not is_shell(access.shell) then
+        access.state = "invalid-shell"
+        print(paint("The retained shell object is no longer usable.", COLOR_RED))
+        return false
+    end if
+
+    // The metadata walk is still a remote action. Clean first, retain only plain
+    // result data, then finalize both target and owned execution route before
+    // printing the inventory or returning to the persistent console.
+    pre_target = cleanup_target(access.staged)
+    pre_execution = clean_execution_route
+    if not pre_target.computer or not pre_execution then
+        access.state = "preclean-failed"
+        access.last_computer_clean = pre_target.computer
+        access.last_router_clean = pre_target.router
+        access.last_execution_clean = pre_execution
+        print(paint("AutoHack refused an interesting-file scan whose pre-clean failed.", COLOR_RED))
+        return false
+    end if
+
+    print(char(10) + paint("Scanning retained session " + index + " for non-stock files ...", COLOR_PURPLE))
+    root = access.shell.host_computer.File("/")
+    if not is_file(root) then
+        scan = {"results": [], "scanned": 0, "stock_ignored": 0,
+            "trash_skipped": 0, "unreadable": 1, "truncated": false,
+            "symlink_api": false,}
+    else
+        scan = inventory_interesting_files(root)
+    end if
+
+    // Do not touch the target again after these retained finalizers.
+    wait(FINALIZER_WAIT_SECONDS)
+    final_target = cleanup_target(access.staged)
+    diag("interesting inventory | session=" + index + " | host=" + access.public_ip +
+        "/" + access.local_ip + " | examined=" + scan.scanned +
+        " | results=" + scan.results.len + " | truncated=" + scan.truncated +
+        " | computer=" + final_target.computer + " | router=" + final_target.router)
+    flush_log
+    final_execution = clean_execution_route
+
+    access.last_computer_clean = final_target.computer
+    access.last_router_clean = final_target.router
+    access.last_execution_clean = final_execution
+    if final_target.computer and final_execution then
+        access.state = "ready"
+    else
+        access.state = "cleanup-failed"
+    end if
+
+    globals.interesting_results = scan.results
+    globals.interesting_session = index
+    print_interesting_inventory(scan, access, index)
+    print("Target computer cleanup: " + paint(final_target.computer, COLOR_GREEN))
+    if final_target.router then
+        print("Target router cleanup: " + paint("clean", COLOR_GREEN))
+    else
+        print("Target router cleanup: " + paint("best effort unavailable", COLOR_ORANGE))
+    end if
+    print("Execution route cleanup: " + paint(final_execution, COLOR_GREEN))
+    print(paint("Returned to the AutoHack console.", COLOR_CYAN))
+    return final_target.computer and final_execution
+end function
+
+
+is_direct_child_path = function(parent_path, child_path)
+    if typeof(parent_path).lower != "string" then return false
+    if typeof(child_path).lower != "string" then return false
+    prefix = parent_path
+    if prefix != "/" then prefix = prefix + "/"
+    relative = child_path
+    if parent_path == "/" then
+        if relative.indexOf("/") != 0 then return false
+        relative = relative[1:]
+    else
+        if relative.indexOf(prefix) != 0 then return false
+        relative = relative[prefix.len:]
+    end if
+    if relative == "" then return false
+    return relative.indexOf("/") == null
+end function
+
+
+discover_trash_roots = function(computer)
+    roots = []
+    pending = [computer.File("/")]
+    seen = {}
+    scanned = 0
+    unreadable = 0
+    truncated = false
+    symlink_api = false
+
+    while pending.len > 0
+        if scanned >= NUKE_SCAN_LIMIT then
+            truncated = true
+            break
+        end if
+        node = pending.pop
+        if not is_file(node) or not node.is_folder then
+            unreadable = unreadable + 1
+            continue
+        end if
+        path = node.path
+        if typeof(path).lower != "string" or path == "" then
+            unreadable = unreadable + 1
+            continue
+        end if
+        if seen.hasIndex(path) then continue
+        seen[path] = 1
+        scanned = scanned + 1
+
+        is_link = false
+        if node.hasIndex("is_symlink") then
+            symlink_api = true
+            is_link = node.is_symlink == 1
+        end if
+        if is_link then continue
+
+        if node.name == ".Trash" then
+            roots.push(path)
+            continue
+        end if
+        folders = node.get_folders
+        if typeof(folders).lower != "list" then
+            unreadable = unreadable + 1
+            continue
+        end if
+        for child in folders
+            pending.push(child)
+        end for
+    end while
+    roots.sort
+    return {"paths": roots, "scanned": scanned, "unreadable": unreadable,
+        "truncated": truncated, "symlink_api": symlink_api,}
+end function
+
+
+empty_trash_roots = function(computer, discovery)
+    targets = {}
+    discovery_issues = discovery.unreadable
+    for trash_path in discovery.paths
+        trash = computer.File(trash_path)
+        if not is_file(trash) or not trash.is_folder or trash.path != trash_path then
+            discovery_issues = discovery_issues + 1
+            continue
+        end if
+        if trash.hasIndex("is_symlink") and trash.is_symlink == 1 then
+            discovery_issues = discovery_issues + 1
+            continue
+        end if
+        files = trash.get_files
+        folders = trash.get_folders
+        if typeof(files).lower != "list" or typeof(folders).lower != "list" then
+            discovery_issues = discovery_issues + 1
+            continue
+        end if
+        for child in files
+            if not is_file(child) or not is_direct_child_path(trash_path, child.path) then
+                discovery_issues = discovery_issues + 1
+            else
+                targets[child.path] = trash_path
+            end if
+        end for
+        for child in folders
+            if not is_file(child) or not is_direct_child_path(trash_path, child.path) then
+                discovery_issues = discovery_issues + 1
+            else
+                targets[child.path] = trash_path
+            end if
+        end for
+    end for
+
+    deleted = 0
+    missing = 0
+    failed = 0
+    paths = targets.indexes
+    paths.sort
+    for path in paths
+        current = computer.File(path)
+        if not is_file(current) then
+            missing = missing + 1
+        else if current.path != path or not is_direct_child_path(targets[path], current.path) then
+            failed = failed + 1
+        else
+            result = current.delete
+            if not is_file(computer.File(path)) then
+                deleted = deleted + 1
+            else
+                failed = failed + 1
+                print(paint("TRASH DELETE FAILED", COLOR_RED) + " " + path + " | " + str(result))
+            end if
+        end if
+    end for
+    return {"targets": paths.len, "deleted": deleted, "missing": missing,
+        "failed": failed, "issues": discovery_issues,}
+end function
+
+
+delete_bin_payloads = function(computer)
+    bin = computer.File("/bin")
+    if not is_file(bin) or not bin.is_folder or bin.path != "/bin" then
+        return {"attempted": 0, "deleted": 0, "missing": 1, "failed": 1,
+            "preserved": 0, "failed_paths": ["/bin"],}
+    end if
+    targets = []
+    failed_paths = []
+    preserved = 0
+    files = bin.get_files
+    folders = bin.get_folders
+    if typeof(files).lower != "list" or typeof(folders).lower != "list" then
+        return {"attempted": 0, "deleted": 0, "missing": 0, "failed": 1,
+            "preserved": 0, "failed_paths": ["/bin enumeration"],}
+    end if
+    for child in files
+        if not is_file(child) or not is_direct_child_path("/bin", child.path) then
+            failed_paths.push("/bin boundary")
+        else if NUKE_PRESERVE_BIN.indexOf(child.path) != null then
+            preserved = preserved + 1
+        else
+            targets.push(child.path)
+        end if
+    end for
+    for child in folders
+        if not is_file(child) or not is_direct_child_path("/bin", child.path) then
+            failed_paths.push("/bin boundary")
+        else
+            targets.push(child.path)
+        end if
+    end for
+    targets.sort
+    deleted = 0
+    missing = 0
+    failed = failed_paths.len
+    for path in targets
+        current = computer.File(path)
+        if not is_file(current) then
+            missing = missing + 1
+        else if current.path != path or not is_direct_child_path("/bin", current.path) then
+            failed = failed + 1
+            failed_paths.push(path)
+        else
+            result = current.delete
+            if not is_file(computer.File(path)) then
+                deleted = deleted + 1
+            else
+                failed = failed + 1
+                failed_paths.push(path)
+                print(paint("BIN DELETE FAILED", COLOR_RED) + " " + path + " | " + str(result))
+            end if
+        end if
+    end for
+    return {"attempted": targets.len, "deleted": deleted, "missing": missing,
+        "failed": failed, "preserved": preserved, "failed_paths": failed_paths,}
+end function
+
+
+nuke_access_session = function(index = -1)
+    if globals.access_sessions.len == 0 then
+        print(paint("No retained access session is available.", COLOR_RED))
+        return false
+    end if
+    if index < 0 then index = selected_access_index
+    if index < 0 or index >= globals.access_sessions.len then
+        print(paint("Session index is outside the retained-access list.", COLOR_RED))
+        return false
+    end if
+    access = globals.access_sessions[index]
+    if not is_shell(access.shell) or access.authority != "root" then
+        print(paint("NUKE REFUSED", COLOR_RED) +
+            " | exact retained root shell required; selected authority=" + access.authority)
+        return false
+    end if
+    computer = access.shell.host_computer
+    if not is_computer(computer) then
+        print(paint("NUKE REFUSED", COLOR_RED) + " | retained target computer is unavailable")
+        return false
+    end if
+    host = access.public_ip + "/" + access.local_ip
+    expected = "NUKE " + host
+
+    print(char(10) + paint("ROWAN BLACKOUT // EXACT TARGET NUKE", COLOR_RED))
+    print("Target: " + paint(host, COLOR_CYAN) + "  Authority: " + paint(access.authority, COLOR_PINK))
+    print(paint("This deletes the retained target filesystem and cannot be undone.", COLOR_RED))
+    print("Only " + paint("/bin/rm", COLOR_ORANGE) + " and " +
+        paint("/bin/rmdir", COLOR_ORANGE) + " are preserved inside /bin.")
+    confirmation = user_input("Type exactly " + expected + ": ").trim
+    if confirmation != expected then
+        print(paint("NUKE CANCELLED", COLOR_ORANGE) + " | confirmation did not match")
+        return false
+    end if
+
+    globals.nuke_attempts = globals.nuke_attempts + 1
+    globals.nuke_last = host + " | staging"
+    diag("nuke start | session=" + index + " | host=" + host + " | authority=root")
+
+    pre_target = cleanup_target(access.staged)
+    pre_execution = clean_execution_route
+    if not pre_target.computer or not pre_execution then
+        globals.nuke_last = host + " | preclean failed"
+        print(paint("NUKE REFUSED", COLOR_RED) + " | pre-clean failed; target was not destroyed")
+        diag("nuke refused | host=" + host + " | computer_clean=" +
+            pre_target.computer + " | execution_clean=" + pre_execution)
+        flush_log
+        return false
+    end if
+
+    show_auto_action("BLACKOUT INVENTORY", "discovering every visible .Trash", COLOR_ORANGE)
+    trash_discovery = discover_trash_roots(computer)
+    trash = empty_trash_roots(computer, trash_discovery)
+    show_auto_action("TRASH PURGED", trash.deleted + "/" + trash.targets +
+        " top-level entries", COLOR_GREEN)
+
+    show_auto_action("BIN STRIP", "preserving rm and rmdir", COLOR_ORANGE)
+    bin_result = delete_bin_payloads(computer)
+
+    root_attempted = 0
+    root_deleted = 0
+    root_missing = 0
+    root_failed = 0
+    failed_paths = []
+    for path in NUKE_ROOTS
+        current = computer.File(path)
+        if not is_file(current) then
+            root_missing = root_missing + 1
+            continue
+        end if
+        root_attempted = root_attempted + 1
+        result = current.delete
+        if not is_file(computer.File(path)) then
+            root_deleted = root_deleted + 1
+        else
+            root_failed = root_failed + 1
+            failed_paths.push(path)
+            print(paint("ROOT DELETE FAILED", COLOR_RED) + " " + path + " | " + str(result))
+        end if
+    end for
+
+    // /var is the last filesystem target. Grey Hack may regenerate it during
+    // reboot; this command reports submission rather than pretending it stays
+    // absent. No target filesystem read occurs after this delete request.
+    show_auto_action("FINAL FILESYSTEM CUT", "/var then reboot", COLOR_RED)
+    var = computer.File("/var")
+    var_submitted = false
+    if is_file(var) and var.path == "/var" then
+        var.delete
+        var_submitted = true
+    end if
+    computer.reboot
+
+    // The retained object points at a deliberately destroyed machine. Release
+    // it without another target read and return only to the owned route.
+    globals.access_sessions.remove(index)
+    if globals.access_sessions.len == 0 then
+        globals.active_session = -1
+    else
+        globals.active_session = globals.access_sessions.len - 1
+    end if
+    execution_clean = clean_execution_route
+
+    total_failed = trash.failed + trash.issues + bin_result.failed + root_failed
+    if total_failed == 0 then
+        globals.nuke_successes = globals.nuke_successes + 1
+        globals.nuke_last = host + " | payload complete"
+    else
+        globals.nuke_last = host + " | partial; failures=" + total_failed
+    end if
+    diag("nuke complete | host=" + host + " | trash_roots=" +
+        trash_discovery.paths.len + " | trash_deleted=" + trash.deleted +
+        " | bin_deleted=" + bin_result.deleted + " | bin_preserved=" +
+        bin_result.preserved + " | roots_deleted=" + root_deleted +
+        " | roots_failed=" + root_failed + " | var_submitted=" +
+        var_submitted + " | execution_clean=" + execution_clean)
+    flush_log
+
+    print(char(10) + paint("ROWAN BLACKOUT RESULTS", COLOR_PURPLE))
+    print("Target: " + paint(host, COLOR_CYAN))
+    print("Trash roots: " + paint(trash_discovery.paths.len, COLOR_CYAN) +
+        "  entries deleted: " + paint(trash.deleted, COLOR_GREEN) +
+        "  issues: " + paint(trash.failed + trash.issues, COLOR_RED))
+    print("/bin deleted: " + paint(bin_result.deleted, COLOR_GREEN) +
+        "  preserved: " + paint(bin_result.preserved, COLOR_ORANGE) +
+        "  failed: " + paint(bin_result.failed, COLOR_RED))
+    print("System roots deleted: " + paint(root_deleted, COLOR_GREEN) +
+        "/" + root_attempted + "  failed: " + paint(root_failed, COLOR_RED))
+    for path in bin_result.failed_paths
+        print("  " + paint("BIN RESIDUAL", COLOR_RED) + " " + path)
+    end for
+    for path in failed_paths
+        print("  " + paint("RESIDUAL", COLOR_RED) + " " + path)
+    end for
+    print("/var delete submitted: " + paint(var_submitted, COLOR_ORANGE) +
+        "  reboot submitted: " + paint(true, COLOR_GREEN))
+    print("Execution route clean: " + paint(execution_clean, COLOR_GREEN))
+    print(paint("The destroyed target session was released. /var may regenerate during reboot.", COLOR_ORANGE))
+    if total_failed == 0 then
+        print(paint("BLACKOUT PAYLOAD COMPLETE", COLOR_GREEN))
+    else
+        print(paint("BLACKOUT PAYLOAD PARTIAL", COLOR_ORANGE) +
+            " | residual items are listed above")
+    end if
+    return true
+end function
+
+
+harden_execution_host = function(mode)
+    mode = mode.lower
+    if mode != "home" and mode != "server" then
+        print(paint("Usage: harden home|server", COLOR_RED))
+        return false
+    end if
+    authority = access_level(globals.local_shell)
+    if authority != "root" then
+        print(paint("HARDEN REFUSED", COLOR_RED) +
+            " | run AutoHack from a root shell; current authority=" + authority)
+        return false
+    end if
+    root = globals.local_computer.File("/")
+    if not is_file(root) or not root.is_folder or root.path != "/" then
+        print(paint("HARDEN REFUSED", COLOR_RED) + " | execution root is unavailable")
+        return false
+    end if
+    if mode == "home" then
+        for path in HOME_HARDEN_TRAVERSE
+            candidate = globals.local_computer.File(path)
+            if not is_file(candidate) or candidate.path != path then
+                print(paint("HARDEN REFUSED", COLOR_RED) + " | bootstrap path missing: " + path)
+                return false
+            end if
+        end for
+        for path in HOME_HARDEN_EXECUTE
+            candidate = globals.local_computer.File(path)
+            if not is_file(candidate) or candidate.path != path then
+                print(paint("HARDEN REFUSED", COLOR_RED) + " | bootstrap path missing: " + path)
+                return false
+            end if
+        end for
+    end if
+
+    host = globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+    expected = "HARDEN " + mode.upper + " " + host
+    print(char(10) + paint("ROWAN FORTIFY // " + mode.upper, COLOR_PURPLE))
+    print("Execution host: " + paint(host, COLOR_CYAN) + "  Authority: " + paint(authority, COLOR_PINK))
+    if mode == "home" then
+        print(paint("Everything becomes root-owned and root-only except the minimal Terminal/sudo/bash bootstrap.", COLOR_ORANGE))
+    else
+        print(paint("Everything becomes root-owned and root-only. SSH root access is required afterward.", COLOR_RED))
+    end if
+    confirmation = user_input("Type exactly " + expected + ": ").trim
+    if confirmation != expected then
+        print(paint("HARDEN CANCELLED", COLOR_ORANGE) + " | confirmation did not match")
+        return false
+    end if
+
+    globals.harden_attempts = globals.harden_attempts + 1
+    globals.harden_last = mode + " | staging"
+    diag("harden start | mode=" + mode + " | host=" + host)
+    if not prepare_execution_cleanup then
+        globals.harden_last = mode + " | cleanup staging failed"
+        print(paint("HARDEN REFUSED", COLOR_RED) +
+            " | owned execution-route cleanup could not be staged")
+        diag("harden refused | mode=" + mode + " | host=" + host +
+            " | reason=execution cleanup unavailable")
+        flush_log
+        return false
+    end if
+    pre_execution = clean_execution_route
+    if not pre_execution then
+        globals.harden_last = mode + " | preclean failed"
+        print(paint("HARDEN REFUSED", COLOR_RED) +
+            " | owned execution route could not be cleaned")
+        diag("harden refused | mode=" + mode + " | host=" + host +
+            " | reason=execution preclean failed")
+        flush_log
+        return false
+    end if
+
+    show_auto_action("OWNERSHIP LOCK", "root:root recursively", COLOR_ORANGE)
+    owner_result = root.set_owner("root", 1)
+    group_result = root.set_group("root", 1)
+    show_auto_action("PERMISSION LOCK", "root rwx; group/other none", COLOR_ORANGE)
+    user_result = root.chmod("u+rwx", 1)
+    group_lock = root.chmod("g-rwx", 1)
+    other_lock = root.chmod("o-rwx", 1)
+
+    restored = 0
+    restore_failed = 0
+    if mode == "home" then
+        for path in HOME_HARDEN_TRAVERSE
+            candidate = globals.local_computer.File(path)
+            if is_file(candidate) and candidate.path == path then
+                candidate.chmod("o+x", 0)
+                restored = restored + 1
+            else
+                restore_failed = restore_failed + 1
+            end if
+        end for
+        for path in HOME_HARDEN_EXECUTE
+            candidate = globals.local_computer.File(path)
+            if is_file(candidate) and candidate.path == path then
+                candidate.chmod("o+rx", 0)
+                restored = restored + 1
+            else
+                restore_failed = restore_failed + 1
+            end if
+        end for
+    end if
+
+    execution_clean = clean_execution_route
+    clean_root = globals.local_computer.File("/")
+    verified_root = is_file(clean_root) and clean_root.owner == "root" and
+        clean_root.group == "root"
+    expected_root_permissions = "drwx------"
+    if mode == "home" then expected_root_permissions = "drwx-----x"
+    verified_permissions = verified_root and
+        clean_root.permissions == expected_root_permissions
+    verified_traverse = true
+    verified_bootstrap = true
+    if mode == "home" then
+        for path in HOME_HARDEN_TRAVERSE
+            candidate = globals.local_computer.File(path)
+            if not is_file(candidate) or candidate.path != path or
+                candidate.permissions != "drwx-----x" then verified_traverse = false
+        end for
+        for path in HOME_HARDEN_EXECUTE
+            candidate = globals.local_computer.File(path)
+            if not is_file(candidate) or candidate.path != path or
+                candidate.permissions != "-rwx---r-x" then verified_bootstrap = false
+        end for
+    end if
+    success = verified_root and verified_permissions and verified_traverse and
+        verified_bootstrap and restore_failed == 0 and execution_clean
+    if success then
+        globals.harden_successes = globals.harden_successes + 1
+        globals.harden_last = mode + " | complete"
+    else
+        globals.harden_last = mode + " | verification issue"
+    end if
+    diag("harden complete | mode=" + mode + " | host=" + host +
+        " | owner_return=" + str(owner_result) + " | group_return=" + str(group_result) +
+        " | user_return=" + str(user_result) + " | group_lock=" + str(group_lock) +
+        " | other_lock=" + str(other_lock) + " | restored=" + restored +
+        " | restore_failed=" + restore_failed + " | root_verified=" +
+        verified_root + " | permissions_verified=" + verified_permissions +
+        " | traverse_verified=" + verified_traverse +
+        " | bootstrap_verified=" + verified_bootstrap +
+        " | execution_clean=" + execution_clean)
+    flush_log
+
+    print(char(10) + paint("ROWAN FORTIFY RESULTS", COLOR_PURPLE))
+    print("Mode: " + paint(mode, COLOR_CYAN) + "  Host: " + paint(host, COLOR_CYAN))
+    print("Root ownership verified: " + paint(verified_root, COLOR_GREEN))
+    print("Root permission pattern: " + paint(clean_root.permissions, COLOR_CYAN) +
+        "  expected: " + paint(expected_root_permissions, COLOR_ORANGE))
+    if mode == "home" then
+        print("Bootstrap paths restored: " + paint(restored, COLOR_GREEN) +
+            "/" + (HOME_HARDEN_TRAVERSE.len + HOME_HARDEN_EXECUTE.len))
+        print("Traversal paths verified: " + paint(verified_traverse, COLOR_GREEN))
+        print("Terminal/sudo/bash bootstrap visible: " + paint(verified_bootstrap, COLOR_GREEN))
+    else
+        print("Exceptions restored: " + paint(0, COLOR_GREEN))
+    end if
+    print("Execution logs clean: " + paint(execution_clean, COLOR_GREEN))
+    if success then
+        print(paint("FORTIFICATION COMPLETE", COLOR_GREEN))
+    else
+        print(paint("FORTIFICATION NEEDS REVIEW", COLOR_RED))
+    end if
+    return success
+end function
+
+
+forget_access_session = function(index = -1)
+    if globals.access_sessions.len == 0 then
+        print(paint("No retained access session is available.", COLOR_ORANGE))
+        return false
+    end if
+    active_before = selected_access_index
+    if index < 0 then index = active_before
+    if index >= globals.access_sessions.len then
+        print(paint("Session index is outside the retained-access list.", COLOR_RED))
+        return false
+    end if
+    access = globals.access_sessions[index]
+    globals.access_sessions.remove(index)
+    if globals.access_sessions.len == 0 then
+        globals.active_session = -1
+    else if active_before > index then
+        globals.active_session = active_before - 1
+    else if active_before == index then
+        globals.active_session = index
+        if globals.active_session >= globals.access_sessions.len then
+            globals.active_session = globals.access_sessions.len - 1
+        end if
+    end if
+    print("Forgot [" + paint(index, COLOR_CYAN) + "] " +
+        paint(access.public_ip, COLOR_CYAN) + "/" + paint(access.local_ip, COLOR_CYAN) + ".")
+    return true
+end function
+
+
+show_status = function()
+    print(paint("AutoHack " + SCRIPT_VERSION + " status", COLOR_PURPLE))
+    print("App root: " + paint(APP_ROOT, COLOR_CYAN))
+    print("Diagnostics: " + paint(LOG_ROOT + "/latest.txt", COLOR_ORANGE))
+    print("Shared vulnerability database: " + paint(VULN_DB_ROOT, COLOR_PURPLE))
+    print("Indexed vulnerability buckets: " + paint(globals.vuln_index.indexes.len, COLOR_GREEN))
+    print("Unknown-library learning: " + paint(LEARN_UNKNOWN_LIBRARIES, COLOR_GREEN))
+    print("Retained access sessions: " + paint(globals.access_sessions.len, COLOR_GREEN) +
+        "/" + MAX_ACCESS_SESSIONS)
+    print("AutoShell: " + paint(globals.autoshell, COLOR_CYAN))
+    print("Automatic poison promotion: " + paint(globals.poison_auto, COLOR_CYAN))
+    print("Poison promotion results: " + paint(globals.poison_successes, COLOR_GREEN) +
+        "/" + paint(globals.poison_attempts, COLOR_ORANGE))
+    print("Last poison state: " + paint(globals.poison_last, COLOR_ORANGE))
+    selected = selected_access_index
+    if selected >= 0 then
+        access = globals.access_sessions[selected]
+        print("Selected target: [" + paint(selected, COLOR_PINK) + "] " +
+            paint(access.public_ip, COLOR_CYAN) + "/" + paint(access.local_ip, COLOR_CYAN) +
+            "  " + paint(access.authority, COLOR_PINK) +
+            "  state=" + paint(access.state, session_state_color(access.state)))
+        if access.promoted then
+            print("Selected target poison promotion: " + paint(access.promotion, COLOR_GREEN))
+        end if
+    end if
+    print("Last interesting inventory: " + paint(globals.interesting_results.len, COLOR_PINK) +
+        " file(s) from session " + paint(globals.interesting_session, COLOR_CYAN))
+    print("Blackout payloads: " + paint(globals.nuke_successes, COLOR_GREEN) +
+        "/" + paint(globals.nuke_attempts, COLOR_ORANGE))
+    print("Last blackout state: " + paint(globals.nuke_last, COLOR_ORANGE))
+    print("Fortifications: " + paint(globals.harden_successes, COLOR_GREEN) +
+        "/" + paint(globals.harden_attempts, COLOR_ORANGE))
+    print("Last fortification state: " + paint(globals.harden_last, COLOR_ORANGE))
+end function
+
+
+show_poison_status = function()
+    print(paint("AutoHack poison-library promotion", COLOR_PURPLE))
+    print("Automatic promotion: " + paint(globals.poison_auto, COLOR_CYAN))
+    print("Library arsenal: " + paint(POISON_LIB_ROOT, COLOR_ORANGE))
+    reboot_source = globals.local_computer.File(REBOOT_SOURCE)
+    reboot_ready = is_file(reboot_source) and not reboot_source.is_folder and
+        reboot_source.is_binary
+    print("Reboot payload: " + paint(REBOOT_SOURCE, COLOR_CYAN) + "  ready=" +
+        paint(reboot_ready, COLOR_GREEN))
+    names = poison_library_names
+    if names.len == 0 then
+        print(paint("No binary poison libraries were found.", COLOR_ORANGE))
+    else
+        print("Available matching libraries: " + paint(names.len, COLOR_GREEN))
+        for name in names
+            print("  " + paint(name, COLOR_PURPLE))
+        end for
+    end if
+    print("Promotions reacquired: " + paint(globals.poison_successes, COLOR_GREEN) +
+        "/" + paint(globals.poison_attempts, COLOR_ORANGE))
+    print("Last state: " + paint(globals.poison_last, COLOR_ORANGE))
+    print(paint("Promotion requires a matching weak library, an exact non-root shell, " +
+        "and root file/computer authority on the same filesystem.", COLOR_PURPLE))
+end function
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+// EMBEDDED NMAP SYNTHWAVE DEEP RECON 1.0.0
+// Preserved donor: C:/Grey Hack/Inbox/2026-08-10 - New Script Intake/
+//                  nmap synthwave v1.0.0.src
+// Donor SHA-256: 3C7546F78B76D1E4246DA398E54A88AB015B442B4C12BE6CC2906F99202BF260
+// This namespace is read-only and isolated from AutoHack retained-access state.
+////////////////////////////////////////////////////////////////////////////////
+
+DEEP_RECON_ENGINE = "1.0.0"
+DEEP_MAX_DEPTH = 4
+DEEP_MAX_NETWORK_DEVICES = 512
+DEEP_MAX_PORT_SWEEP_ROUTERS = 4
+DEEP_MAX_PORT_NUMBER = 65535
+DEEP_TABLE_PRINT_LIMIT = 1400
+DEEP_TABLE_DELIMITER = char(9)
+
+
+deep_usage = function()
+    return "<b>Usage: nmap [--quick] [ip_address|domain]</b>" + char(10) +
+        "Runs the complete read-only Synthwave Deep Recon engine: stock ports, " +
+        "router identity, firewall rules, full 0-65535 forwarding sweeps, LAN " +
+        "discovery, internal services, switches, Whois, and explicit pivot gaps." + char(10) +
+        "Use --quick to skip exhaustive port and direct-subnet sweeps."
+end function
+
+
+deep_safe_string = function(value, fallback="-")
+    kind = typeof(value).lower
+    if kind == "string" then
+        if value != "" then return value
+        return fallback
+    end if
+    if kind == "number" then return str(value)
+    return fallback
+end function
+
+
+
+deep_is_router_device = function(value)
+    kind = typeof(value).lower
+    return kind == "router" or kind == "switch"
+end function
+
+
+deep_clean_spaces = function(value)
+    text = deep_safe_string(value, "").replace(char(13), " ").replace(char(10), " ").trim
+    while text.indexOf("  ") != null
+        text = text.replace("  ", " ")
+    end while
+    return text
+end function
+
+
+deep_bounded_text = function(value, limit=240)
+    text = deep_clean_spaces(value)
+    if text.len > limit then return text[:limit] + "..."
+    return text
+end function
+
+
+deep_heading = function(title)
+    print(char(10) + "<size=125%><b>" + paint(title, COLOR_PURPLE) + "</b></size>")
+end function
+
+
+deep_plain_cell = function(value)
+    text = str(value)
+    for color in [COLOR_PURPLE, COLOR_CYAN, COLOR_GREEN, COLOR_RED, COLOR_ORANGE, COLOR_PINK]
+        text = text.replace("<color=" + color + ">", "")
+    end for
+    return text.replace("</color>", "")
+end function
+
+
+deep_render_table_line = function(cells, widths)
+    line = ""
+    index = 0
+    while index < cells.len
+        cell = cells[index]
+        line = line + cell
+        if index < cells.len - 1 then
+            padding = widths[index] - deep_plain_cell(cell).len + 2
+            if padding < 1 then padding = 1
+            line = line + (" " * padding)
+        end if
+        index = index + 1
+    end while
+    return line
+end function
+
+
+deep_table_row = function(cells)
+    safe_cells = []
+    for cell in cells
+        safe_cells.push(str(cell).replace(char(13), " ").replace(char(10), " ").replace(DEEP_TABLE_DELIMITER, " "))
+    end for
+    return safe_cells.join(DEEP_TABLE_DELIMITER)
+end function
+
+
+deep_print_table = function(header, rows)
+    if typeof(rows).lower != "list" or rows.len == 0 then return
+    header_cells = header.split(DEEP_TABLE_DELIMITER)
+    widths = []
+    for cell in header_cells
+        widths.push(cell.len)
+    end for
+    split_rows = []
+    for row in rows
+        cells = row.split(DEEP_TABLE_DELIMITER)
+        split_rows.push(cells)
+        index = 0
+        while index < cells.len
+            while widths.len <= index
+                widths.push(0)
+            end while
+            width = deep_plain_cell(cells[index]).len
+            if width > widths[index] then widths[index] = width
+            index = index + 1
+        end while
+    end for
+
+    colored_header = []
+    for cell in header_cells
+        colored_header.push(paint(cell, COLOR_PURPLE))
+    end for
+    rendered_header = deep_render_table_line(colored_header, widths)
+    buffer = rendered_header
+    for cells in split_rows
+        rendered = deep_render_table_line(cells, widths)
+        if buffer.len + rendered.len + 1 > DEEP_TABLE_PRINT_LIMIT then
+            print(buffer)
+            buffer = rendered_header + char(10) + rendered
+        else
+            buffer = buffer + char(10) + rendered
+        end if
+    end for
+    if buffer != rendered_header then print(buffer)
+end function
+
+
+
+deep_port_record = function(router, port_object)
+    info = router.port_info(port_object)
+    if typeof(info).lower != "string" or info == "" then info = "unknown -"
+    info = deep_bounded_text(info, 160)
+    pieces = info.split(" ")
+    service = "unknown"
+    version = "-"
+    if pieces.len > 0 then service = pieces[0]
+    if pieces.len > 1 then version = pieces[1:].join(" ")
+    lan_ip = deep_safe_string(port_object.get_lan_ip, "-")
+    return {"number": port_object.port_number, "closed": port_object.is_closed,
+        "service": service, "version": version, "info": info, "lan": lan_ip,
+        "hidden_external": false, "forward_scope": "",}
+end function
+
+
+deep_sort_port_records = function(records)
+    i = 0
+    while i < records.len
+        j = i + 1
+        while j < records.len
+            if records[j].number < records[i].number then
+                temp = records[i]
+                records[i] = records[j]
+                records[j] = temp
+            end if
+            j = j + 1
+        end while
+        i = i + 1
+    end while
+    return records
+end function
+
+
+deep_records_from_ports = function(router, ports)
+    records = []
+    if typeof(ports).lower != "list" then return records
+    for port_object in ports
+        if typeof(port_object).lower == "port" then records.push(deep_port_record(router, port_object))
+    end for
+    return deep_sort_port_records(records)
+end function
+
+
+deep_wan_links = function(wan_records, internal_record)
+    internet_links = []
+    upstream_links = []
+    closed_links = []
+    for wan_record in wan_records
+        if wan_record.lan == internal_record.lan and wan_record.info == internal_record.info then
+            if wan_record.closed then
+                closed_links.push(wan_record.number)
+            else if wan_record.forward_scope == "WAN" then
+                internet_links.push(wan_record.number)
+            else
+                upstream_links.push(wan_record.number)
+            end if
+        end if
+    end for
+    return {"internet": internet_links, "upstream": upstream_links, "closed": closed_links}
+end function
+
+
+deep_router_key = function(router)
+    return deep_safe_string(router.public_ip, "?") + "|" + deep_safe_string(router.local_ip, "?")
+end function
+
+
+deep_same_router = function(left, right)
+    if not deep_is_router_device(left) or not deep_is_router_device(right) then return false
+    return deep_router_key(left) == deep_router_key(right)
+end function
+
+
+deep_status_cell = function(label, color)
+    return paint(label, color)
+end function
+
+
+deep_firewall_row = function(router_id, raw_rule)
+    rule = deep_clean_spaces(raw_rule)
+    pieces = rule.split(" ")
+    if pieces.len < 4 then
+        return deep_table_row([paint(router_id, COLOR_PINK), paint("RAW", COLOR_ORANGE),
+            "-", "-", paint(deep_bounded_text(rule, 160), COLOR_ORANGE)])
+    end if
+    action = "?"
+    port = "?"
+    source = "?"
+    destination = "?"
+    if pieces.len > 0 then action = pieces[0]
+    if pieces.len > 1 then port = pieces[1]
+    if pieces.len > 2 then source = pieces[2]
+    if pieces.len > 3 then destination = pieces[3:].join(" ")
+    action_color = COLOR_ORANGE
+    if action.lower == "allow" then action_color = COLOR_GREEN
+    if action.lower == "deny" or action.lower == "reject" then action_color = COLOR_RED
+    return deep_table_row([paint(router_id, COLOR_PINK), paint(action, action_color),
+        paint(port, COLOR_CYAN), paint(source, COLOR_CYAN), paint(destination, COLOR_CYAN)])
+end function
+
+
+deep_show_whois = function(public_ip)
+    deep_heading("WHOIS // PUBLIC IDENTITY")
+    print("Public network: " + paint(public_ip, COLOR_CYAN))
+    result = whois(public_ip)
+    if typeof(result).lower != "string" or result == "" then
+        print(paint("Whois returned no data.", COLOR_ORANGE))
+        return
+    end if
+    for raw_line in result.replace(char(13), "").split(char(10))
+        line = deep_bounded_text(raw_line, 300)
+        if line == "" then continue
+        colon = line.indexOf(":")
+        if colon == null then
+            print(paint(line, COLOR_CYAN))
+        else
+            label = line[:colon]
+            value = line[colon + 1:].trim
+            print(label + ": " + paint(value, COLOR_CYAN))
+        end if
+    end for
+end function
+
+
+deep_show_basic_nmap = function(router, target_ip, target_is_lan, ports)
+    deep_heading("BASIC NMAP READOUT")
+    print("Starting nmap synthwave v" + DEEP_RECON_ENGINE + " at " + paint(current_date, COLOR_ORANGE))
+    print("Interesting ports on " + paint(target_ip, COLOR_CYAN))
+    if typeof(ports).lower == "string" then
+        print(paint(ports, COLOR_RED))
+        return
+    end if
+    if typeof(ports).lower != "list" then
+        print(paint("No port data returned from this vantage.", COLOR_ORANGE))
+        return
+    end if
+    records = deep_records_from_ports(router, ports)
+    if records.len == 0 then
+        print(paint("Scan finished. No visible ports.", COLOR_ORANGE))
+        return
+    end if
+    rows = []
+    for record in records
+        state = deep_status_cell("open", COLOR_GREEN)
+        if record.closed and not target_is_lan then state = deep_status_cell("closed", COLOR_RED)
+        rows.push(deep_table_row([paint(record.number, COLOR_CYAN), state,
+            paint(record.service, COLOR_CYAN), record.version, paint(record.lan, COLOR_CYAN)]))
+    end for
+    header = deep_table_row(["PORT", "STATE", "SERVICE", "VERSION", "LAN"])
+    deep_print_table(header, rows)
+end function
+
+
+deep_discover_child = function(ip, current_router)
+    child = get_switch(ip)
+    if deep_is_router_device(child) and not deep_same_router(child, current_router) then
+        return {"device": child, "kind": "switch"}
+    end if
+    return null
+end function
+
+
+deep_add_gap = function(router_id, ip, reason)
+    clean_reason = deep_bounded_text(reason, 240)
+    key = router_id + "|" + ip + "|" + clean_reason
+    if globals.deep_seen_gaps.hasIndex(key) then return
+    globals.deep_seen_gaps[key] = 1
+    globals.deep_gaps.push({"router": router_id, "ip": ip, "reason": clean_reason})
+end function
+
+
+deep_full_port_sweep = function(router, router_id, visible_records, device_kind, forward_scope)
+    all_records = visible_records[0:]
+    sweep_label = forward_scope.lower + " forwarding"
+    if globals.deep_quick then
+        deep_add_gap(router_id, deep_safe_string(router.public_ip), "full " + sweep_label + " sweep skipped by --quick")
+        return all_records
+    end if
+    if device_kind == "switch" then return all_records
+    if globals.deep_stats.full_port_sweeps >= DEEP_MAX_PORT_SWEEP_ROUTERS then
+        deep_add_gap(router_id, deep_safe_string(router.public_ip), "full " + sweep_label + " sweep safety limit reached")
+        return all_records
+    end if
+
+    globals.deep_stats.full_port_sweeps = globals.deep_stats.full_port_sweeps + 1
+    sweep_hidden = 0
+    known = {}
+    for record in visible_records
+        known[str(record.number)] = 1
+    end for
+    print(paint(router_id + " scanning " + sweep_label + " ports 0-" + DEEP_MAX_PORT_NUMBER + "...", COLOR_PURPLE))
+    sweep_start = time
+    candidate = 0
+    while candidate <= DEEP_MAX_PORT_NUMBER
+        port_object = router.ping_port(candidate)
+        if typeof(port_object).lower == "port" and not known.hasIndex(str(candidate)) then
+            record = deep_port_record(router, port_object)
+            record.number = candidate
+            record.hidden_external = true
+            record.forward_scope = forward_scope
+            all_records.push(record)
+            known[str(candidate)] = 1
+            state = deep_status_cell("HIDDEN-FWD", COLOR_ORANGE)
+            if forward_scope == "UPSTREAM" then state = deep_status_cell("HIDDEN-UPSTREAM", COLOR_ORANGE)
+            if record.closed then state = deep_status_cell("HIDDEN-CLOSED", COLOR_RED)
+            globals.deep_hidden_wan_rows.push(deep_table_row([paint(router_id, COLOR_PINK),
+                paint(forward_scope, COLOR_CYAN), paint(candidate, COLOR_CYAN), state,
+                paint(record.service, COLOR_CYAN), record.version, paint(record.lan, COLOR_CYAN)]))
+            globals.deep_stats.hidden_external_ports = globals.deep_stats.hidden_external_ports + 1
+            sweep_hidden = sweep_hidden + 1
+        end if
+        candidate = candidate + 1
+        if candidate % 1000 == 0 then wait(0.01)
+    end while
+    print(paint(router_id + " " + sweep_label + " sweep complete in " + (time - sweep_start) + "s", COLOR_GREEN) +
+        "  hidden=" + paint(sweep_hidden, COLOR_PINK))
+    return deep_sort_port_records(all_records)
+end function
+
+
+deep_expand_direct_subnet = function(router, router_id, addresses)
+    if globals.deep_quick then
+        deep_add_gap(router_id, deep_safe_string(router.local_ip), "direct /24 ping discovery skipped by --quick")
+        return addresses
+    end if
+    if not deep_same_router(router, globals.deep_vantage_router) then
+        deep_add_gap(router_id, deep_safe_string(router.local_ip),
+            "direct /24 ping discovery requires execution inside this router's LAN")
+        return addresses
+    end if
+    local_ip = deep_safe_string(router.local_ip, "")
+    pieces = local_ip.split(".")
+    if pieces.len != 4 then
+        deep_add_gap(router_id, local_ip, "could not derive a /24 subnet from router local IP")
+        return addresses
+    end if
+
+    prefix = pieces[0] + "." + pieces[1] + "." + pieces[2] + "."
+    print(paint(router_id + " probing direct subnet " + prefix + "1-254...", COLOR_PURPLE))
+    octet = 1
+    while octet <= 254
+        candidate = prefix + octet
+        cache_key = router_id + "|" + candidate
+        reply = globals.deep_execution_shell.ping(candidate)
+        globals.deep_ping_cache[cache_key] = reply
+        if reply and addresses.indexOf(candidate) == null then
+            addresses.push(candidate)
+            globals.deep_unlisted_hosts[cache_key] = 1
+            globals.deep_stats.unlisted_hosts = globals.deep_stats.unlisted_hosts + 1
+        end if
+        octet = octet + 1
+        if octet % 50 == 0 then wait(0.01)
+    end while
+    globals.deep_stats.subnet_sweeps = globals.deep_stats.subnet_sweeps + 1
+    return addresses
+end function
+
+
+deep_collect_router = function(router, device_kind, depth, via)
+    if not deep_is_router_device(router) then return
+    if globals.deep_stats.routers >= DEEP_MAX_NETWORK_DEVICES then
+        deep_add_gap("LIMIT", via, "router/switch safety limit reached")
+        return
+    end if
+    key = deep_router_key(router)
+    if globals.deep_seen_routers.hasIndex(key) then return
+    globals.deep_seen_routers[key] = 1
+
+    router_number = globals.deep_stats.routers
+    globals.deep_stats.routers = globals.deep_stats.routers + 1
+    router_id = "R" + router_number
+    public_ip = deep_safe_string(router.public_ip, "-")
+    local_ip = deep_safe_string(router.local_ip, "-")
+    kernel = deep_safe_string(router.kernel_version, "unknown")
+    essid = deep_safe_string(router.essid_name, "unavailable/disabled")
+    bssid = deep_safe_string(router.bssid_name, "-")
+    if device_kind == "switch" then globals.deep_stats.switches = globals.deep_stats.switches + 1
+    router_is_vantage = deep_same_router(router, globals.deep_vantage_router)
+
+    globals.deep_router_rows.push(deep_table_row([paint(router_id, COLOR_PINK),
+        paint(device_kind.upper, COLOR_CYAN), paint(public_ip, COLOR_CYAN),
+        paint(local_ip, COLOR_CYAN), paint(kernel, COLOR_CYAN),
+        paint(depth, COLOR_PINK), paint(via, COLOR_CYAN)]))
+
+    wifi_state = paint(essid, COLOR_CYAN)
+    if device_kind == "switch" then
+        wifi_state = paint("N/A", COLOR_ORANGE)
+        bssid = "-"
+    else if essid == "unavailable/disabled" then
+        wifi_state = paint(essid, COLOR_ORANGE)
+    end if
+    globals.deep_wifi_rows.push(deep_table_row([paint(router_id, COLOR_PINK),
+        paint(device_kind.upper, COLOR_CYAN), wifi_state, paint(bssid, COLOR_CYAN)]))
+
+    globals.deep_control_rows.push(deep_table_row([paint(router_id, COLOR_PINK), paint(0, COLOR_CYAN),
+        paint("NATIVE", COLOR_ORANGE), paint("kernel_router.so", COLOR_CYAN),
+        kernel, paint(local_ip, COLOR_CYAN)]))
+    globals.deep_stats.control_endpoints = globals.deep_stats.control_endpoints + 1
+
+    raw_rules = router.firewall_rules
+    if typeof(raw_rules).lower == "list" then
+        for rule in raw_rules
+            globals.deep_firewall_rows.push(deep_firewall_row(router_id, rule))
+            globals.deep_stats.firewall_rules = globals.deep_stats.firewall_rules + 1
+        end for
+        if raw_rules.len == 0 then
+            globals.deep_firewall_notes.push(paint(router_id, COLOR_PINK) + " " +
+                paint("No explicit firewall rules reported.", COLOR_ORANGE))
+        end if
+    else
+        globals.deep_firewall_notes.push(paint(router_id, COLOR_PINK) + " " +
+            paint("Firewall rule data unavailable.", COLOR_ORANGE))
+        deep_add_gap(router_id, local_ip, "firewall rules unavailable")
+    end if
+
+    raw_wan_ports = router.used_ports
+    if depth == 0 and not globals.deep_target_is_lan and typeof(globals.deep_basic_ports).lower == "list" then
+        raw_wan_ports = globals.deep_basic_ports
+    end if
+    if typeof(raw_wan_ports).lower == "string" then
+        globals.deep_forwarding_notes.push(paint(router_id, COLOR_PINK) + " " +
+            paint("Forwarding list unavailable: " + deep_bounded_text(raw_wan_ports, 180), COLOR_ORANGE))
+        deep_add_gap(router_id, public_ip, raw_wan_ports)
+    else if typeof(raw_wan_ports).lower != "list" then
+        globals.deep_forwarding_notes.push(paint(router_id, COLOR_PINK) + " " +
+            paint("Forwarding list unavailable from this vantage.", COLOR_ORANGE))
+        deep_add_gap(router_id, public_ip, "forwarding list unavailable")
+    end if
+    wan_records = deep_records_from_ports(router, raw_wan_ports)
+    forward_scope = "UPSTREAM"
+    if depth == 0 and not globals.deep_target_is_lan then forward_scope = "WAN"
+    for record in wan_records
+        record.forward_scope = forward_scope
+        wan_state = deep_status_cell("FORWARDED", COLOR_ORANGE)
+        if forward_scope == "UPSTREAM" then wan_state = deep_status_cell("UPSTREAM-FWD", COLOR_ORANGE)
+        if record.closed then wan_state = deep_status_cell("CLOSED", COLOR_RED)
+        globals.deep_wan_rows.push(deep_table_row([paint(router_id, COLOR_PINK),
+            paint(forward_scope, COLOR_CYAN), paint(record.number, COLOR_CYAN), wan_state,
+            paint(record.service, COLOR_CYAN), record.version, paint(record.lan, COLOR_CYAN)]))
+        globals.deep_stats.visible_wan_ports = globals.deep_stats.visible_wan_ports + 1
+    end for
+    wan_records = deep_full_port_sweep(router, router_id, wan_records, device_kind, forward_scope)
+
+    addresses = []
+    listed_addresses = {}
+    if is_valid_ip(local_ip) then
+        add_unique(addresses, local_ip)
+        listed_addresses[local_ip] = 1
+    end if
+    devices = router.devices_lan_ip
+    if typeof(devices).lower == "list" then
+        for ip in devices
+            if is_valid_ip(ip) then
+                add_unique(addresses, ip)
+                listed_addresses[ip] = 1
+            end if
+        end for
+    else
+        deep_add_gap(router_id, local_ip, "LAN device list unavailable from this vantage")
+    end if
+    if depth == 0 and globals.deep_target_is_lan then
+        add_unique(addresses, globals.deep_target_ip)
+        if listed_addresses.hasIndex(globals.deep_target_ip) == false then
+            globals.deep_unlisted_hosts[router_id + "|" + globals.deep_target_ip] = 1
+            globals.deep_stats.unlisted_hosts = globals.deep_stats.unlisted_hosts + 1
+        end if
+    end if
+    addresses = deep_expand_direct_subnet(router, router_id, addresses)
+    addresses.sort
+
+    if not router_is_vantage then
+        deep_add_gap(router_id, local_ip,
+            "execution-host ping and local switch-object lookup withheld outside this LAN to avoid private-IP collisions")
+    end if
+
+    for ip in addresses
+        if globals.deep_stats.lan_nodes >= DEEP_MAX_NETWORK_DEVICES then
+            deep_add_gap(router_id, ip, "LAN node safety limit reached")
+            break
+        end if
+        host_key = router_id + "|" + ip
+        if globals.deep_seen_hosts.hasIndex(host_key) then continue
+        globals.deep_seen_hosts[host_key] = 1
+
+        child_info = null
+        node_kind = "host"
+        if ip == local_ip then
+            node_kind = device_kind
+        else if router_is_vantage then
+            child_info = deep_discover_child(ip, router)
+            if typeof(child_info).lower == "map" then node_kind = child_info.kind
+        end if
+
+        cache_key = router_id + "|" + ip
+        ping_reply = null
+        ping_label = deep_status_cell("UNKNOWN", COLOR_ORANGE)
+        if router_is_vantage then
+            if globals.deep_ping_cache.hasIndex(cache_key) then
+                ping_reply = globals.deep_ping_cache[cache_key]
+            else
+                ping_reply = globals.deep_execution_shell.ping(ip)
+                globals.deep_ping_cache[cache_key] = ping_reply
+            end if
+            ping_label = deep_status_cell("NO-REPLY", COLOR_RED)
+            if ping_reply then ping_label = deep_status_cell("REPLY", COLOR_GREEN)
+        end if
+
+        raw_ports = null
+        if depth == 0 and globals.deep_target_is_lan and ip == globals.deep_target_ip then
+            raw_ports = globals.deep_basic_ports
+        else
+            raw_ports = router.device_ports(ip)
+        end if
+
+        visibility = deep_status_cell("NO-DATA", COLOR_ORANGE)
+        port_count = 0
+        if typeof(raw_ports).lower == "list" then
+            port_count = raw_ports.len
+            visibility = deep_status_cell("VISIBLE", COLOR_GREEN)
+            if raw_ports.len == 0 then visibility = deep_status_cell("NO-SERVICE", COLOR_ORANGE)
+        else if typeof(raw_ports).lower == "string" then
+            lower_error = raw_ports.lower
+            visibility = deep_status_cell("FILTERED", COLOR_ORANGE)
+            if lower_error.indexOf("firewall") != null or lower_error.indexOf("unreachable") != null then
+                visibility = deep_status_cell("BLOCKED", COLOR_RED)
+            end if
+            globals.deep_stats.filtered = globals.deep_stats.filtered + 1
+            deep_add_gap(router_id, ip, raw_ports)
+        else
+            globals.deep_stats.filtered = globals.deep_stats.filtered + 1
+            deep_add_gap(router_id, ip, "device ports unavailable; closer LAN vantage required")
+        end if
+
+        host_number = globals.deep_stats.lan_nodes
+        host_id = "H" + host_number
+        globals.deep_stats.lan_nodes = globals.deep_stats.lan_nodes + 1
+        discovery = paint("ROUTER-LIST", COLOR_CYAN)
+        if ip == local_ip then discovery = paint("ROUTER-LOCAL", COLOR_CYAN)
+        if globals.deep_unlisted_hosts.hasIndex(cache_key) then discovery = paint("PING-UNLISTED", COLOR_ORANGE)
+        globals.deep_host_rows.push(deep_table_row([paint(host_id, COLOR_PINK), paint(router_id, COLOR_PINK),
+            paint(ip, COLOR_CYAN), paint(node_kind.upper, COLOR_CYAN), discovery,
+            ping_label, visibility, paint(port_count, COLOR_PINK)]))
+
+        internal_records = deep_records_from_ports(router, raw_ports)
+        for record in internal_records
+            links = deep_wan_links(wan_records, record)
+            mapped_text = "-"
+            scope = deep_status_cell("NO-FORWARD-MATCH", COLOR_CYAN)
+            if links.internet.len > 0 then
+                mapped_text = links.internet.join(",")
+                scope = deep_status_cell("LIKELY-WAN-MAPPED", COLOR_ORANGE)
+            else if links.upstream.len > 0 then
+                mapped_text = links.upstream.join(",")
+                scope = deep_status_cell("LIKELY-UPSTREAM-MAPPED", COLOR_ORANGE)
+            else if links.closed.len > 0 then
+                mapped_text = links.closed.join(",")
+                scope = deep_status_cell("MAPPED-CLOSED", COLOR_RED)
+            else if record.closed then
+                scope = deep_status_cell("CLOSED-NO-MATCH", COLOR_RED)
+            end if
+            globals.deep_port_rows.push(deep_table_row([paint(host_id, COLOR_PINK),
+                paint(ip, COLOR_CYAN), paint(record.number, COLOR_CYAN), scope,
+                paint(record.service, COLOR_CYAN), record.version, paint(mapped_text, COLOR_CYAN)]))
+            globals.deep_stats.internal_ports = globals.deep_stats.internal_ports + 1
+            if links.internet.len == 0 and links.upstream.len == 0 and links.closed.len == 0 then
+                globals.deep_stats.unmatched_internal_ports = globals.deep_stats.unmatched_internal_ports + 1
+            end if
+        end for
+
+        if typeof(child_info).lower == "map" then
+            globals.deep_topology_rows.push(deep_table_row([paint(router_id, COLOR_PINK),
+                paint("->", COLOR_PURPLE), paint(ip, COLOR_CYAN),
+                paint(child_info.kind.upper, COLOR_CYAN), paint("DISCOVERED", COLOR_GREEN)]))
+            if depth < DEEP_MAX_DEPTH then
+                deep_collect_router(child_info.device, child_info.kind, depth + 1, router_id + "/" + ip)
+            else
+                deep_add_gap(router_id, ip, "child " + child_info.kind + " found at recursion depth limit")
+            end if
+        else if node_kind != "host" and not router_is_vantage then
+            deep_add_gap(router_id, ip,
+                "child-object lookup withheld outside execution LAN to avoid private-IP collision")
+        end if
+    end for
+end function
+
+
+run_deep_recon = function(recon_args)
+    globals.deep_quick = false
+    target_argument = ""
+    for argument in recon_args
+        if argument == "-h" or argument == "--help" then
+            print(deep_usage)
+            return true
+        end if
+        if argument == "--quick" then
+            globals.deep_quick = true
+        else if argument[:2] == "--" then
+            print(paint("nmap: unknown option", COLOR_RED) + " " + argument)
+            print(deep_usage)
+            return false
+        else
+            if target_argument != "" then
+                print(deep_usage)
+                return false
+            end if
+            target_argument = argument
+        end if
+    end for
+    if target_argument == "" then
+        print(deep_usage)
+        return false
+    end if
+
+    globals.deep_execution_shell = get_shell
+    globals.deep_execution_computer = globals.deep_execution_shell.host_computer
+    globals.deep_vantage_router = get_router
+
+    globals.deep_requested_target = target_argument
+    globals.deep_target_ip = globals.deep_requested_target
+    if globals.deep_target_ip == "127.0.0.1" then
+        globals.deep_target_ip = globals.deep_execution_computer.local_ip
+    end if
+    if not is_valid_ip(globals.deep_target_ip) then
+        globals.deep_target_ip = nslookup(globals.deep_target_ip)
+    end if
+    if not is_valid_ip(globals.deep_target_ip) then
+        print(paint("nmap: target could not be resolved", COLOR_RED) + " " +
+            globals.deep_requested_target)
+        return false
+    end if
+    globals.deep_target_is_lan = is_lan_ip(globals.deep_target_ip)
+    if not globals.deep_target_is_lan and
+        not globals.deep_execution_computer.is_network_active then
+        print(paint("nmap: no Internet route for this public target", COLOR_RED))
+        return false
+    end if
+
+    globals.deep_root_router = null
+    if globals.deep_target_is_lan then
+        globals.deep_root_router = get_router
+    else
+        globals.deep_root_router = get_router(globals.deep_target_ip)
+    end if
+    if not deep_is_router_device(globals.deep_root_router) then
+        print(paint("nmap: router or target not found", COLOR_RED) + " " +
+            paint(globals.deep_target_ip, COLOR_CYAN))
+        return false
+    end if
+
+globals.deep_basic_ports = null
+if globals.deep_target_is_lan then
+    globals.deep_basic_ports = globals.deep_root_router.device_ports(globals.deep_target_ip)
+else
+    globals.deep_basic_ports = globals.deep_root_router.used_ports
+end if
+
+globals.deep_router_rows = []
+globals.deep_wifi_rows = []
+globals.deep_control_rows = []
+globals.deep_firewall_rows = []
+globals.deep_firewall_notes = []
+globals.deep_forwarding_notes = []
+globals.deep_wan_rows = []
+globals.deep_hidden_wan_rows = []
+globals.deep_host_rows = []
+globals.deep_port_rows = []
+globals.deep_topology_rows = []
+globals.deep_gaps = []
+globals.deep_seen_routers = {}
+globals.deep_seen_hosts = {}
+globals.deep_seen_gaps = {}
+globals.deep_ping_cache = {}
+globals.deep_unlisted_hosts = {}
+globals.deep_stats = {"routers": 0, "switches": 0, "control_endpoints": 0,
+    "firewall_rules": 0, "visible_wan_ports": 0, "hidden_external_ports": 0,
+    "full_port_sweeps": 0, "subnet_sweeps": 0, "unlisted_hosts": 0,
+    "lan_nodes": 0, "internal_ports": 0, "unmatched_internal_ports": 0, "filtered": 0,}
+globals.deep_scan_start = time
+
+print("<align=center><size=125%><b>" + paint("NMAP", COLOR_PURPLE) + " // " +
+    paint("SYNTHWAVE DEEP RECON", COLOR_PINK) + "</b></size></align>")
+print("Target " + paint(globals.deep_requested_target, COLOR_CYAN) + " -> " +
+    paint(globals.deep_target_ip, COLOR_CYAN) + "  version=" + paint(DEEP_RECON_ENGINE, COLOR_PINK))
+scan_mode = "FULL"
+if globals.deep_quick then scan_mode = "QUICK"
+print("Mode " + paint(scan_mode, COLOR_PINK))
+
+deep_heading("EXECUTION VANTAGE")
+vantage_rows = []
+vantage_rows.push(deep_table_row(["HOST", paint(deep_safe_string(globals.deep_execution_computer.get_name, "unknown"), COLOR_GREEN)]))
+vantage_rows.push(deep_table_row(["USER", paint(active_user, COLOR_GREEN)]))
+vantage_rows.push(deep_table_row(["PUBLIC_IP", paint(deep_safe_string(globals.deep_execution_computer.public_ip), COLOR_CYAN)]))
+vantage_rows.push(deep_table_row(["LOCAL_IP", paint(deep_safe_string(globals.deep_execution_computer.local_ip), COLOR_CYAN)]))
+vantage_rows.push(deep_table_row(["GATEWAY", paint(deep_safe_string(globals.deep_execution_computer.network_gateway), COLOR_CYAN)]))
+vantage_rows.push(deep_table_row(["ADAPTER", paint(deep_safe_string(globals.deep_execution_computer.active_net_card), COLOR_GREEN)]))
+deep_print_table(deep_table_row(["FIELD", "VALUE"]), vantage_rows)
+
+deep_show_basic_nmap(globals.deep_root_router, globals.deep_target_ip, globals.deep_target_is_lan, globals.deep_basic_ports)
+deep_show_whois(globals.deep_root_router.public_ip)
+
+same_public = deep_safe_string(globals.deep_execution_computer.public_ip, "") == deep_safe_string(globals.deep_root_router.public_ip, "-")
+globals.deep_coverage = "EXTERNAL-VIEW"
+if globals.deep_target_is_lan or same_public then globals.deep_coverage = "LAN-VISIBLE"
+if globals.deep_coverage == "EXTERNAL-VIEW" then
+    deep_add_gap("ROOT", globals.deep_root_router.public_ip,
+        "external view cannot prove devices hidden behind nested firewalls; re-run from an internal foothold")
+end if
+deep_add_gap("API", globals.deep_target_ip,
+    "game-hidden LAN identities suppress passive device listing and ping; absence requires a known IP or another vantage")
+
+deep_heading("DEEP TOPOLOGY COLLECTION")
+print(paint("Enumerating forwarded ports, router-local control planes, LAN nodes, " +
+    "internal services, local switches, pivot gaps, and firewall barriers...", COLOR_PURPLE))
+deep_collect_router(globals.deep_root_router, typeof(globals.deep_root_router).lower, 0, "target")
+print(paint("API collection pass complete.", COLOR_GREEN))
+if globals.deep_gaps.len > 0 then print(paint(globals.deep_gaps.len + " coverage gap(s) recorded.", COLOR_ORANGE))
+
+deep_heading("ROUTERS + SWITCHES")
+deep_print_table(deep_table_row(["IDX", "TYPE", "PUBLIC_IP", "LOCAL_IP", "KERNEL", "DEPTH", "VIA"]), globals.deep_router_rows)
+
+deep_heading("WIRELESS IDENTITY")
+deep_print_table(deep_table_row(["IDX", "TYPE", "ESSID", "BSSID"]), globals.deep_wifi_rows)
+
+deep_heading("ROUTER CONTROL PLANE")
+print(paint("Port 0 is reported from kernel_version as a native router endpoint, not as a forwarded-port probe.", COLOR_ORANGE))
+deep_print_table(deep_table_row(["IDX", "PORT", "STATE", "SERVICE", "VERSION", "LAN"]), globals.deep_control_rows)
+
+deep_heading("FIREWALL RULES")
+if globals.deep_firewall_rows.len > 0 then
+    deep_print_table(deep_table_row(["ROUTER", "ACTION", "PORT", "SOURCE", "DEST"]), globals.deep_firewall_rows)
+end if
+for note in globals.deep_firewall_notes
+    print(note)
+end for
+
+deep_heading("FORWARDING MAP")
+if globals.deep_wan_rows.len == 0 then
+    if globals.deep_forwarding_notes.len == 0 then
+        print(paint("No forwarded ports reported.", COLOR_ORANGE))
+    else
+        print(paint("No forwarding rows were available from the reported devices.", COLOR_ORANGE))
+    end if
+else
+    deep_print_table(deep_table_row(["ROUTER", "SCOPE", "FWD_PORT", "STATE", "SERVICE", "VERSION", "DEST_LAN"]), globals.deep_wan_rows)
+end if
+for note in globals.deep_forwarding_notes
+    print(note)
+end for
+
+deep_heading("NON-VISIBLE FORWARDS")
+print(paint("Found by exhaustive router.ping_port sweeps; used_ports omits non-visible forwards.", COLOR_ORANGE))
+if globals.deep_quick then
+    print(paint("NOT ASSESSED in --quick mode.", COLOR_ORANGE))
+else if globals.deep_stats.full_port_sweeps == 0 then
+    print(paint("NOT ASSESSED; no eligible forwarding sweep completed.", COLOR_ORANGE))
+else if globals.deep_hidden_wan_rows.len == 0 then
+    print(paint("None observed in " + globals.deep_stats.full_port_sweeps + " completed eligible sweep(s).", COLOR_GREEN))
+    if globals.deep_gaps.len > 0 then print(paint("Review coverage gaps for unassessed devices.", COLOR_ORANGE))
+else
+    deep_print_table(deep_table_row(["ROUTER", "SCOPE", "FWD_PORT", "STATE", "SERVICE", "VERSION", "DEST_LAN"]), globals.deep_hidden_wan_rows)
+end if
+
+deep_heading("LAN NODE INVENTORY")
+if globals.deep_host_rows.len == 0 then
+    print(paint("No LAN nodes were observable from this vantage.", COLOR_ORANGE))
+else
+    deep_print_table(deep_table_row(["HOST", "ROUTER", "IP", "TYPE", "DISCOVERY", "PING_FROM_EXEC", "VISIBILITY", "PORTS"]), globals.deep_host_rows)
+end if
+
+deep_heading("INTERNAL PORT MAP")
+print(paint("LIKELY mappings correlate destination LAN IP plus service/version; the API does not expose an exact internal destination port.", COLOR_ORANGE))
+if globals.deep_port_rows.len == 0 then
+    print(paint("No internal service ports were observable.", COLOR_ORANGE))
+else
+    deep_print_table(deep_table_row(["HOST", "IP", "PORT", "SCOPE", "SERVICE", "VERSION", "MAPPED_PORT"]), globals.deep_port_rows)
+end if
+
+deep_heading("LOCAL SWITCH EDGES")
+if globals.deep_topology_rows.len == 0 then
+    print(paint("No local switch objects were directly discoverable from the execution LAN.", COLOR_ORANGE))
+else
+    deep_print_table(deep_table_row(["FROM", "EDGE", "ADDRESS", "TYPE", "STATE"]), globals.deep_topology_rows)
+end if
+
+deep_heading("COVERAGE GAPS // NEXT PIVOTS")
+if globals.deep_gaps.len == 0 then
+    print(paint("No API-visible coverage gaps were reported in the observed topology.", COLOR_GREEN))
+else
+    gap_number = 0
+    for gap in globals.deep_gaps
+        print("[" + paint(gap_number, COLOR_PINK) + "] " + paint(gap.router, COLOR_PINK) + " " +
+            paint(gap.ip, COLOR_CYAN) + "  " + paint(gap.reason, COLOR_ORANGE))
+        gap_number = gap_number + 1
+    end for
+    print(paint("Pivot guidance: acquire a shell on or inside the listed boundary, then run this nmap again.", COLOR_ORANGE))
+end if
+
+deep_heading("SCAN SUMMARY")
+summary_rows = []
+coverage_color = COLOR_ORANGE
+if globals.deep_coverage == "LAN-VISIBLE" then coverage_color = COLOR_GREEN
+summary_rows.push(deep_table_row(["COVERAGE", paint(globals.deep_coverage, coverage_color)]))
+summary_rows.push(deep_table_row(["ROUTE_DEVICES", paint(globals.deep_stats.routers, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["ROUTERS", paint(globals.deep_stats.routers - globals.deep_stats.switches, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["SWITCHES", paint(globals.deep_stats.switches, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["CONTROL_ENDPOINTS", paint(globals.deep_stats.control_endpoints, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["FIREWALL_RULES", paint(globals.deep_stats.firewall_rules, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["FORWARDS_VISIBLE", paint(globals.deep_stats.visible_wan_ports, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["FORWARDS_HIDDEN", paint(globals.deep_stats.hidden_external_ports, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["FULL_PORT_SWEEPS", paint(globals.deep_stats.full_port_sweeps, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["DIRECT_SUBNET_SWEEPS", paint(globals.deep_stats.subnet_sweeps, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["PING_UNLISTED_HOSTS", paint(globals.deep_stats.unlisted_hosts, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["LAN_NODES", paint(globals.deep_stats.lan_nodes, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["INTERNAL_PORTS", paint(globals.deep_stats.internal_ports, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["NO_FORWARD_MATCH", paint(globals.deep_stats.unmatched_internal_ports, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["FILTERED_OR_UNKNOWN", paint(globals.deep_stats.filtered, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["PIVOT_GAPS", paint(globals.deep_gaps.len, COLOR_PINK)]))
+summary_rows.push(deep_table_row(["ELAPSED_SECONDS", paint(time - globals.deep_scan_start, COLOR_PINK)]))
+deep_print_table(deep_table_row(["METRIC", "VALUE"]), summary_rows)
+print(paint("READ-ONLY", COLOR_GREEN) + "  no exploits, service sessions, file writes, or network configuration changes")
+print(paint("Observation boundary:", COLOR_ORANGE) + " results are complete only for data visible from this execution vantage.")
+    return true
+end function
+
+
+show_help = function()
+    print(paint("AutoHack " + SCRIPT_VERSION, COLOR_PURPLE))
+    print("  " + paint("<ip> [port|lan-ip] [lan-ip]", COLOR_GREEN) + "  attack all services or one exact port")
+    print("  " + paint("target <ip> [port|lan-ip] [lan-ip]", COLOR_GREEN) + "  explicit form of the same command")
+    print("  " + paint("nmap <ip|host> [--quick]", COLOR_PURPLE) + "       embedded read-only deep topology recon")
+    print("  " + paint("sessions", COLOR_CYAN) + "                     list retained verified access")
+    print("  " + paint("where / whoami", COLOR_CYAN) + "               show execution origin and selected target")
+    print("  " + paint("shell [index]", COLOR_GREEN) + "                open latest or selected access")
+    print("  " + paint("interesting [index]", COLOR_PURPLE) + "          list non-stock files without reading contents")
+    print("  " + paint("autoshell [on|off]", COLOR_CYAN) + "           show or change automatic shell entry")
+    print("  " + paint("poison [status|list|on|off]", COLOR_PURPLE) + "  inspect or control weak-library promotion")
+    print("  " + paint("nuke [index]", COLOR_RED) + "                 Blackout one retained root target")
+    print("  " + paint("harden home|server", COLOR_ORANGE) + "           fortify this execution host")
+    print("  " + paint("forget [index|all]", COLOR_ORANGE) + "          release retained access objects")
+    print("  " + paint("status", COLOR_CYAN) + "                       show storage and VDB readiness")
+    print("  " + paint("help", COLOR_CYAN) + "                         show this help")
+    print("  " + paint("quit", COLOR_ORANGE) + "                         leave AutoHack")
+    print(char(10) + "Examples:")
+    print("  " + paint("20.20.20.20", COLOR_CYAN))
+    print("  " + paint("20.20.20.20 22", COLOR_CYAN))
+    print("  " + paint("20.20.20.20 192.168.0.2", COLOR_CYAN) + "     scan all services for this LAN machine")
+    print("  " + paint("20.20.20.20 22 192.168.0.2", COLOR_CYAN) + "  require that exact LAN machine")
+    print("  " + paint("20.20.20.20 0 192.168.0.1", COLOR_CYAN) + "   target the router control plane")
+    print("  " + paint("nmap 20.20.20.20", COLOR_PURPLE) + "              full embedded deep recon")
+    print("  " + paint("shell", COLOR_GREEN) + "  open the newest retained session and return here on exit")
+    print("  " + paint("interesting 0", COLOR_PURPLE) + "  inventory unusual files on retained session 0")
+    print("  " + paint("nuke 0", COLOR_RED) + "  destroy retained root session 0 after exact confirmation")
+    print("  " + paint("harden home", COLOR_ORANGE) + "  root-lock this host while preserving Terminal bootstrap")
+    print("  " + paint("harden server", COLOR_ORANGE) + "  root-lock this entire SSH server")
+    print(char(10) + "Successful access is retained without opening a terminal unless AutoShell is on.")
+    print("AutoHack stays open after failures and after target terminals close.")
+    print(paint("Nuke and harden always require explicit target-specific confirmation.", COLOR_RED))
+    print("The Rowan circuit prompt reads left-to-right from execution origin to selected target.")
+end function
+
+
+words_from_line = function(line)
+    words = []
+    if typeof(line).lower != "string" then return words
+    for word in line.split(" ")
+        word = word.trim
+        if word != "" then words.push(word)
+    end for
+    return words
+end function
+
+
+parse_target_words = function(words)
+    start = 0
+    if words.len > 0 then
+        command = words[0].lower
+        if command == "target" or command == "hack" then start = 1
+    end if
+    if words.len <= start then
+        return {"ok": false, "error": "Usage: <public-ip> [port|lan-ip] [lan-ip]"}
+    end if
+
+    ip = words[start]
+    if not is_valid_ip(ip) then
+        return {"ok": false, "error": "Invalid public IP."}
+    end if
+
+    port = -1
+    lan = ""
+    if words.len > start + 1 then
+        selector = words[start + 1]
+        if is_lan_ip(selector) then
+            lan = selector
+            if words.len > start + 2 then
+                return {"ok": false, "error": "Usage: <public-ip> [port|lan-ip] [lan-ip]"}
+            end if
+        else
+            port = selector.to_int
+            if typeof(port).lower != "number" then
+                return {"ok": false, "error": "Second value must be a port or target LAN IP."}
+            end if
+            if port < 0 or port > 65535 then
+                return {"ok": false, "error": "Port must be between 0 and 65535."}
+            end if
+            if words.len > start + 2 then
+                lan = words[start + 2]
+                if not is_lan_ip(lan) then
+                    return {"ok": false, "error": "Invalid target LAN IP."}
+                end if
+            end if
+            if words.len > start + 3 then
+                return {"ok": false, "error": "Usage: <public-ip> [port|lan-ip] [lan-ip]"}
+            end if
+        end if
+    end if
+
+    return {"ok": true, "ip": ip, "port": port, "lan": lan, "error": ""}
+end function
+
+
+run_console_command = function(words)
+    if words.len == 0 then return true
+    command = words[0].lower
+    if command == "quit" or command == "q" or command == "exit" then return false
+    if command == "help" or command == "--help" or command == "-h" then
+        show_help
+        return true
+    end if
+    if command == "nmap" or command == "deepmap" then
+        recon_args = []
+        if words.len > 1 then
+            for word in words[1:]
+                recon_args.push(word)
+            end for
+        end if
+        run_deep_recon(recon_args)
+        return true
+    end if
+    if command == "status" then
+        show_status
+        return true
+    end if
+    if command == "where" or command == "whoami" or command == "location" then
+        show_location
+        return true
+    end if
+    if command == "sessions" then
+        show_access_sessions
+        return true
+    end if
+    if command == "interesting" or command == "i" then
+        if words.len > 2 then
+            print(paint("Usage: interesting [index]", COLOR_RED))
+            return true
+        end if
+        index = -1
+        if words.len == 2 and words[1].lower != "latest" then
+            index = words[1].to_int
+            if typeof(index).lower != "number" or index < 0 then
+                print(paint("Session index must be zero or greater.", COLOR_RED))
+                return true
+            end if
+        end if
+        scan_interesting_session(index)
+        return true
+    end if
+    if command == "shell" then
+        if words.len > 2 then
+            print(paint("Usage: shell [index]", COLOR_RED))
+            return true
+        end if
+        index = -1
+        if words.len == 2 and words[1].lower != "latest" then
+            index = words[1].to_int
+            if typeof(index).lower != "number" or index < 0 then
+                print(paint("Session index must be zero or greater.", COLOR_RED))
+                return true
+            end if
+        end if
+        open_access_session(index)
+        return true
+    end if
+    if command == "autoshell" then
+        if words.len == 1 then
+            print("AutoShell: " + paint(globals.autoshell, COLOR_CYAN))
+            return true
+        end if
+        if words.len != 2 then
+            print(paint("Usage: autoshell [on|off]", COLOR_RED))
+            return true
+        end if
+        mode = words[1].lower
+        if mode == "on" then
+            globals.autoshell = true
+        else if mode == "off" then
+            globals.autoshell = false
+        else
+            print(paint("Usage: autoshell [on|off]", COLOR_RED))
+            return true
+        end if
+        print("AutoShell: " + paint(globals.autoshell, COLOR_CYAN))
+        return true
+    end if
+    if command == "poison" then
+        if words.len == 1 then
+            show_poison_status
+            return true
+        end if
+        if words.len != 2 then
+            print(paint("Usage: poison [status|list|on|off]", COLOR_RED))
+            return true
+        end if
+        mode = words[1].lower
+        if mode == "status" or mode == "list" then
+            show_poison_status
+            return true
+        end if
+        if mode == "on" then
+            globals.poison_auto = true
+        else if mode == "off" then
+            globals.poison_auto = false
+        else
+            print(paint("Usage: poison [status|list|on|off]", COLOR_RED))
+            return true
+        end if
+        print("Automatic poison promotion: " + paint(globals.poison_auto, COLOR_CYAN))
+        return true
+    end if
+    if command == "nuke" or command == "blackout" then
+        if words.len > 2 then
+            print(paint("Usage: nuke [index]", COLOR_RED))
+            return true
+        end if
+        index = -1
+        if words.len == 2 and words[1].lower != "latest" then
+            index = words[1].to_int
+            if typeof(index).lower != "number" or index < 0 then
+                print(paint("Session index must be zero or greater.", COLOR_RED))
+                return true
+            end if
+        end if
+        nuke_access_session(index)
+        return true
+    end if
+    if command == "harden" or command == "fortify" then
+        if words.len != 2 then
+            print(paint("Usage: harden home|server", COLOR_RED))
+            return true
+        end if
+        harden_execution_host(words[1])
+        return true
+    end if
+    if command == "forget" then
+        if words.len > 2 then
+            print(paint("Usage: forget [index|all]", COLOR_RED))
+            return true
+        end if
+        if words.len == 2 and words[1].lower == "all" then
+            count = globals.access_sessions.len
+            globals.access_sessions = []
+            globals.active_session = -1
+            print("Forgot " + paint(count, COLOR_CYAN) + " retained session(s).")
+            return true
+        end if
+        index = -1
+        if words.len == 2 and words[1].lower != "latest" then
+            index = words[1].to_int
+            if typeof(index).lower != "number" or index < 0 then
+                print(paint("Session index must be zero or greater.", COLOR_RED))
+                return true
+            end if
+        end if
+        forget_access_session(index)
+        return true
+    end if
+
+    target = parse_target_words(words)
+    if not target.ok then
+        print(paint(target.error, COLOR_RED))
+        return true
+    end if
+
+    success = run_target(target.ip, target.port, target.lan)
+    if success then
+        print(paint("AUTOHACK COMPLETE", COLOR_GREEN))
+    else
+        print(paint("AUTOHACK FAILED", COLOR_RED))
+        print("See " + paint(LOG_ROOT + "/latest.txt", COLOR_ORANGE))
+    end if
+    return true
+end function
+
+
+if params.len > 0 and params[0] == "--router-clean-helper" then router_helper_mode
+
+globals.local_shell = get_shell
+if not is_shell(globals.local_shell) then exit("AutoHack requires a local shell.")
+globals.local_computer = globals.local_shell.host_computer
+globals.metaxploit = include_lib("/lib/metaxploit.so")
+globals.crypto = include_lib("/lib/crypto.so")
+globals.execution_computer_source = null
+globals.execution_router_source = null
+globals.network_root_passwords = {}
+globals.retained_results = []
+globals.access_sessions = []
+globals.active_session = -1
+globals.autoshell = false
+globals.interesting_results = []
+globals.interesting_session = -1
+globals.poison_auto = true
+globals.poison_attempts = 0
+globals.poison_successes = 0
+globals.poison_last = "none"
+globals.nuke_attempts = 0
+globals.nuke_successes = 0
+globals.nuke_last = "none"
+globals.harden_attempts = 0
+globals.harden_successes = 0
+globals.harden_last = "none"
+
+show_banner
+if typeof(globals.metaxploit).lower != "metaxploitlib" then exit("Missing /lib/metaxploit.so.")
+if typeof(globals.crypto).lower != "cryptolib" then exit("Missing /lib/crypto.so.")
+if not init_storage then exit("AutoHack could not create /root/autoscripts/autohack.")
+init_log
+init_vulns
+diag("startup | host=" + globals.local_computer.public_ip + "/" +
+    globals.local_computer.local_ip)
+
+keep_running = true
+if params.len > 0 then
+    keep_running = run_console_command(params)
+else
+    show_help
+end if
+while keep_running
+    line = user_input(console_prompt).trim
+    keep_running = run_console_command(words_from_line(line))
+end while
+diag("shutdown | retained_sessions=" + globals.access_sessions.len)
+globals.access_sessions = []
+flush_log
+if is_file(globals.execution_computer_source) then
+    wait(FINALIZER_WAIT_SECONDS)
+    clean_execution_route
+end if
