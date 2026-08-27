@@ -1,0 +1,1170 @@
+//Made By Hobo & Rowan
+// AutoDeploy 1.1.2 payload controller for Grey Hack Public v0.9.6773.
+// Deploys an editable payload to the final AutoRoute proxy and retracts only
+// the files recorded in its local deployment ledger.
+
+SCRIPT_VERSION = "1.1.2"
+
+// Personal activation PIN. The GitHub-ready source leaves this blank.
+PIN = ""
+
+APP_ROOT = "/root/autoscripts/autodeploy"
+LOG_ROOT = APP_ROOT + "/logs"
+TASK_ROOT = APP_ROOT + "/tasks"
+LOG_PATH = LOG_ROOT + "/latest.txt"
+PAYLOAD_PATH = TASK_ROOT + "/payload.txt"
+DEPLOYMENT_PATH = TASK_ROOT + "/active-deployment.txt"
+MANUAL_TARGET_PATH = TASK_ROOT + "/manual-target.txt"
+
+NETWORK_ROOT = "/root/autoscripts/network"
+ACTIVE_PROXY_ROUTE_PATH = NETWORK_ROOT + "/active-proxy-route.txt"
+
+PAYLOAD_HEADER = "ASDEPLOYPAYLOAD1"
+DEPLOYMENT_HEADER = "ASDEPLOYMENT1"
+MANUAL_TARGET_HEADER = "ASDEPLOYTARGET1"
+ACTIVE_PROXY_ROUTE_HEADER = "ASPROXY1"
+
+COLOR_PURPLE = "#D86CFF"
+COLOR_CYAN = "#55E7FF"
+COLOR_GREEN = "#63FF9B"
+COLOR_RED = "#FF5C7C"
+COLOR_ORANGE = "#FFB86B"
+COLOR_PINK = "#FF79C6"
+COLOR_LAVENDER = "#C7A7E8"
+COLOR_DIM = "#A79BC8"
+
+
+paint = function(value, color)
+    return "<color=" + color + ">" + str(value) + "</color>"
+end function
+
+
+is_file = function(value)
+    return typeof(value).lower == "file"
+end function
+
+
+is_shell = function(value)
+    return typeof(value).lower == "shell"
+end function
+
+
+is_computer = function(value)
+    return typeof(value).lower == "computer"
+end function
+
+
+join_path = function(folder, name)
+    if folder == "/" then return "/" + name
+    if folder[-1] == "/" then return folder + name
+    return folder + "/" + name
+end function
+
+
+base_name = function(path)
+    parts = path.split("/")
+    if parts.len == 0 then return ""
+    return parts[-1]
+end function
+
+
+safe_field = function(value)
+    if typeof(value).lower != "string" then return false
+    if value.indexOf("|") != null then return false
+    if value.indexOf(char(10)) != null then return false
+    if value.indexOf(char(13)) != null then return false
+    return true
+end function
+
+
+ensure_folder_path_on = function(computer, path)
+    if not is_computer(computer) then return null
+    current = "/"
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        next_path = join_path(current, part)
+        item = computer.File(next_path)
+        if is_file(item) then
+            if not item.is_folder then return null
+        else
+            if computer.create_folder(current, part) != 1 then return null
+            item = computer.File(next_path)
+            if not is_file(item) then return null
+        end if
+        current = next_path
+    end for
+    return computer.File(path)
+end function
+
+
+ensure_folder_path = function(path)
+    return ensure_folder_path_on(globals.local_computer, path)
+end function
+
+
+ensure_text_file = function(path)
+    file = globals.local_computer.File(path)
+    if is_file(file) then
+        if file.is_folder or file.is_binary then return null
+        return file
+    end if
+    parts = path.split("/")
+    name = parts[-1]
+    parent = path[0 : path.len - name.len - 1]
+    if parent == "" then parent = "/"
+    if not is_file(ensure_folder_path(parent)) then return null
+    if globals.local_computer.touch(parent, name) != 1 then return null
+    file = globals.local_computer.File(path)
+    if not is_file(file) then return null
+    return file
+end function
+
+
+split_exact = function(value, separator)
+    parts = []
+    if typeof(value).lower != "string" then return parts
+    current = ""
+    index = 0
+    while index < value.len
+        character = value[index]
+        if character == separator then
+            parts.push(current)
+            current = ""
+        else
+            current = current + character
+        end if
+        index = index + 1
+    end while
+    parts.push(current)
+    return parts
+end function
+
+
+text_lines = function(content)
+    lines = []
+    if typeof(content).lower != "string" then return lines
+    current = ""
+    index = 0
+    while index < content.len
+        character = content[index]
+        if character == char(10) or character == char(13) then
+            lines.push(current)
+            current = ""
+            if character == char(13) and index + 1 < content.len then
+                if content[index + 1] == char(10) then index = index + 1
+            end if
+        else
+            current = current + character
+        end if
+        index = index + 1
+    end while
+    if current != "" or content.len == 0 then lines.push(current)
+    return lines
+end function
+
+
+read_lines = function(file)
+    if not is_file(file) then return []
+    if file.is_folder or file.is_binary then return []
+    content = file.get_content
+    if typeof(content).lower != "string" then return []
+    return text_lines(content)
+end function
+
+
+write_lines = function(path, lines)
+    file = ensure_text_file(path)
+    if not is_file(file) then return false
+    return file.set_content(lines.join(char(10))) == 1
+end function
+
+
+show_event = function(label, detail = "", label_color = "", detail_color = "", sequence = 0)
+    if label_color == "" then label_color = COLOR_PURPLE
+    if detail_color == "" then detail_color = COLOR_DIM
+    line = paint("◆ " + label, label_color)
+    if sequence > 0 then line = line + " " + paint("[ADLOG " + sequence + "]", COLOR_DIM)
+    if detail != "" then line = line + "  " + paint(detail, detail_color)
+    print(line)
+end function
+
+
+show_indexed_event = function(label, index, detail = "", label_color = "", detail_color = "")
+    if label_color == "" then label_color = COLOR_PURPLE
+    if detail_color == "" then detail_color = COLOR_DIM
+    line = paint("◆ " + label, label_color) + " " + paint("[" + index + "]", COLOR_PINK)
+    if detail != "" then line = line + "  " + paint(detail, detail_color)
+    print(line)
+end function
+
+
+show_branch = function(label_a, value_a, color_a, label_b = "", value_b = "", color_b = "")
+    if color_b == "" then color_b = COLOR_DIM
+    line = paint("  ╰ " + label_a + "=", COLOR_DIM) + paint(value_a, color_a)
+    if label_b != "" then
+        line = line + paint("  |  " + label_b + "=", COLOR_DIM) + paint(value_b, color_b)
+    end if
+    print(line)
+end function
+
+
+show_access_retained = function(object_type, authority)
+    print(paint("  ╰ ACCESS RETAINED  ", COLOR_GREEN) + paint(object_type, COLOR_CYAN) +
+        paint("  authority=", COLOR_DIM) + paint(authority, COLOR_PINK))
+end function
+
+
+value_color = function(value, failure_when_positive = false)
+    if failure_when_positive then
+        if value > 0 then return COLOR_RED
+        return COLOR_GREEN
+    end if
+    if value then return COLOR_GREEN
+    return COLOR_RED
+end function
+
+
+record_diag = function(label, detail = "")
+    globals.log_sequence = globals.log_sequence + 1
+    plain = "[ADLOG " + globals.log_sequence + "] " + label
+    if detail != "" then plain = plain + " | " + detail
+    file = ensure_text_file(LOG_PATH)
+    if not is_file(file) then return globals.log_sequence
+    existing = file.get_content
+    if typeof(existing).lower != "string" then existing = ""
+    if existing != "" then existing = existing + char(10)
+    file.set_content(existing + plain)
+    return globals.log_sequence
+end function
+
+
+init_layout = function()
+    if not is_file(ensure_folder_path(LOG_ROOT)) then return false
+    if not is_file(ensure_folder_path(TASK_ROOT)) then return false
+    if not is_file(ensure_text_file(LOG_PATH)) then return false
+    return true
+end function
+
+
+default_payload_lines = function()
+    return [
+        PAYLOAD_HEADER,
+        "# F|source absolute path|remote destination folder",
+        "# Missing local files are skipped. Existing remote files are preserved.",
+        "F|/bin/autohack|/bin",
+        "F|/bin/autorecon|/bin",
+        "F|/bin/autotrash|/bin",
+        "F|/bin/autosentry|/bin",
+        "F|/bin/autoacademic|/bin",
+        "F|/bin/autocredential|/bin",
+        "F|/bin/autocorrupt|/bin",
+        "F|/lib/metaxploit.so|/lib",
+        "F|/lib/crypto.so|/lib"]
+end function
+
+
+ensure_payload_manifest = function()
+    file = globals.local_computer.File(PAYLOAD_PATH)
+    if not is_file(file) then return write_lines(PAYLOAD_PATH, default_payload_lines)
+    lines = read_lines(file)
+    if lines.len == 0 or lines[0].trim != PAYLOAD_HEADER then return false
+    return true
+end function
+
+
+migrate_payload_manifest = function()
+    file = globals.local_computer.File(PAYLOAD_PATH)
+    lines = read_lines(file)
+    current_entry = "F|/bin/autocredential|/bin"
+    legacy_entry = "F|/bin/autocred|/bin"
+    has_current = false
+    for line in lines
+        if line.trim == current_entry then has_current = true
+    end for
+    updated = []
+    changed = false
+    for line in lines
+        if line.trim == legacy_entry then
+            changed = true
+            if not has_current then
+                updated.push(current_entry)
+                has_current = true
+            end if
+        else
+            updated.push(line)
+        end if
+    end for
+    if not changed then return true
+    if not write_lines(PAYLOAD_PATH, updated) then return false
+    globals.payload_manifest_migrated = true
+    return true
+end function
+
+
+load_payload = function()
+    entries = []
+    file = globals.local_computer.File(PAYLOAD_PATH)
+    lines = read_lines(file)
+    if lines.len == 0 or lines[0].trim != PAYLOAD_HEADER then return entries
+    for line in lines[1:]
+        line = line.trim
+        if line == "" or line[0] == "#" then continue
+        fields = split_exact(line, "|")
+        if fields.len != 3 or fields[0] != "F" then continue
+        source = fields[1].trim
+        destination = fields[2].trim
+        if source == "" or destination == "" then continue
+        if source[0] != "/" or destination[0] != "/" then continue
+        if not safe_field(source) or not safe_field(destination) then continue
+        entry = {}
+        entry.source = source
+        entry.destination = destination
+        entries.push(entry)
+    end for
+    return entries
+end function
+
+
+parse_target_line = function(line, expected_prefix)
+    line = line.trim
+    fields = split_exact(line, "|")
+    if fields.len != 6 or fields[0].trim != expected_prefix then return null
+    index = fields[1].trim.to_int
+    port = fields[3].trim.to_int
+    if index == null or index < 1 then return null
+    if port == null or port < 1 or port > 65535 then return null
+    target = {}
+    target.index = index
+    target.ip = fields[2].trim
+    target.port = port
+    target.user = fields[4].trim
+    target.password = fields[5].trim
+    if target.ip == "" or target.user == "" then return null
+    return target
+end function
+
+
+load_route_target = function()
+    globals.route_handoff_status = "not checked"
+    file = globals.local_computer.File(ACTIVE_PROXY_ROUTE_PATH)
+    if not is_file(file) then
+        globals.route_handoff_status = "file missing"
+        return null
+    end if
+    if file.is_folder then
+        globals.route_handoff_status = "path is a folder"
+        return null
+    end if
+    if file.is_binary then
+        globals.route_handoff_status = "file is binary"
+        return null
+    end if
+    lines = read_lines(file)
+    if lines.len == 0 then
+        globals.route_handoff_status = "file empty"
+        return null
+    end if
+    header_ok = lines[0].trim == ACTIVE_PROXY_ROUTE_HEADER
+    rows_seen = 0
+    rows_valid = 0
+    target = null
+    for line in lines
+        clean = line.trim
+        if clean == "" or clean == ACTIVE_PROXY_ROUTE_HEADER then continue
+        fields = split_exact(clean, "|")
+        if fields.len > 0 and fields[0].trim == "P" then
+            rows_seen = rows_seen + 1
+            candidate = parse_target_line(clean, "P")
+            if candidate != null then
+                rows_valid = rows_valid + 1
+                target = candidate
+            end if
+        end if
+    end for
+    if target == null then
+        globals.route_handoff_status = "no valid proxy rows (" + rows_valid + "/" + rows_seen +
+            "); expected P|index|ip|port|user|password"
+        return null
+    end if
+    target.source = "autoroute"
+    globals.route_handoff_status = "ready: " + target.ip + ":" + target.port +
+        " (" + rows_valid + "/" + rows_seen + " proxy rows)"
+    if not header_ok then
+        globals.route_handoff_status = globals.route_handoff_status + "; header mismatch tolerated"
+    end if
+    return target
+end function
+
+
+load_manual_target = function()
+    file = globals.local_computer.File(MANUAL_TARGET_PATH)
+    lines = read_lines(file)
+    if lines.len < 2 or lines[0].trim != MANUAL_TARGET_HEADER then return null
+    target = parse_target_line(lines[1], "T")
+    if target != null then target.source = "manual"
+    return target
+end function
+
+
+current_target = function()
+    target = load_route_target
+    if target != null then return target
+    return load_manual_target
+end function
+
+
+target_identity = function(target)
+    if target == null then return "none"
+    return target.ip + ":" + target.port
+end function
+
+
+save_manual_target = function(target)
+    if target == null then return false
+    if not safe_field(target.ip) or not safe_field(target.user) or not safe_field(target.password) then return false
+    line = "T|0|" + target.ip + "|" + target.port + "|" + target.user + "|" + target.password
+    return write_lines(MANUAL_TARGET_PATH, [MANUAL_TARGET_HEADER, line])
+end function
+
+
+setup_target = function()
+    show_event("MANUAL TARGET", "fallback setup", COLOR_PURPLE, COLOR_ORANGE)
+    show_branch("preferred", "AutoRoute handoff", COLOR_GREEN)
+    ip = user_input("Public IP: ").trim
+    if ip == "" then
+        show_event("TARGET SETUP CANCELLED", "no public IP", COLOR_RED, COLOR_ORANGE)
+        return false
+    end if
+    port_text = user_input("SSH port [22]: ").trim
+    if port_text == "" then port_text = "22"
+    port = port_text.to_int
+    if port == null or port < 1 or port > 65535 then
+        show_event("TARGET SETUP FAILED", "SSH port must be 1-65535", COLOR_RED, COLOR_ORANGE)
+        return false
+    end if
+    user = user_input("SSH user [root]: ").trim
+    if user == "" then user = "root"
+    password = user_input("SSH password: ", 1)
+    target = {}
+    target.ip = ip
+    target.port = port
+    target.user = user
+    target.password = password
+    if not save_manual_target(target) then
+        show_event("TARGET SETUP FAILED", "manual target could not be saved", COLOR_RED, COLOR_ORANGE)
+        return false
+    end if
+    show_event("MANUAL TARGET READY", "fallback saved", COLOR_GREEN, COLOR_GREEN)
+    show_branch("endpoint", ip + ":" + port, COLOR_CYAN, "authority", user, COLOR_PINK)
+    return true
+end function
+
+
+connect_target = function(target)
+    if target == null then return null
+    source_color = COLOR_ORANGE
+    if target.source == "autoroute" then source_color = COLOR_GREEN
+    show_event("CONNECT", "remote endpoint", COLOR_PURPLE, COLOR_DIM)
+    show_branch("endpoint", target_identity(target), COLOR_CYAN, "source", target.source, source_color)
+    show_branch("authority", target.user, COLOR_PINK)
+    remote = globals.local_shell.connect_service(target.ip, target.port,
+        target.user, target.password, "ssh")
+    if not is_shell(remote) then
+        show_event("CONNECTION FAILED", target_identity(target), COLOR_RED, COLOR_CYAN)
+        return null
+    end if
+    show_access_retained("shell", target.user)
+    return remote
+end function
+
+
+root_from_value = function(value)
+    if is_shell(value) then return value.host_computer.File("/")
+    if is_computer(value) then return value.File("/")
+    if is_file(value) then
+        current = value
+        while current.parent
+            current = current.parent
+        end while
+        return current
+    end if
+    return null
+end function
+
+
+child_named = function(folder, name)
+    if not is_file(folder) or not folder.is_folder then return null
+    folders = folder.get_folders
+    if typeof(folders).lower == "list" then
+        for child in folders
+            if child.name == name then return child
+        end for
+    else if is_file(folders) and folders.name == name then
+        return folders
+    end if
+    files = folder.get_files
+    if typeof(files).lower == "list" then
+        for child in files
+            if child.name == name then return child
+        end for
+    else if is_file(files) and files.name == name then
+        return files
+    end if
+    return null
+end function
+
+
+file_from_root = function(root, path)
+    if not is_file(root) then return null
+    current = root
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        current = child_named(current, part)
+        if not is_file(current) then return null
+    end for
+    return current
+end function
+
+
+scrub_source_from_value = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return null
+    for path in ["/var/silentclean", "/etc/fstab", "/etc/xorg.conf"]
+        source = file_from_root(root, path)
+        if is_file(source) and not source.is_folder and not source.is_binary then return source
+    end for
+    etc = file_from_root(root, "/etc")
+    if is_file(etc) and etc.is_folder then
+        files = etc.get_files
+        if typeof(files).lower == "list" then
+            for source in files
+                if is_file(source) and not source.is_folder and not source.is_binary then return source
+            end for
+        else if is_file(files) and not files.is_folder and not files.is_binary then
+            return files
+        end if
+    end if
+    return null
+end function
+
+
+stage_clean_source = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return null
+    var_folder = file_from_root(root, "/var")
+    if not is_file(var_folder) or not var_folder.is_folder then return null
+    if not var_folder.has_permission("w") then return null
+    return scrub_source_from_value(value)
+end function
+
+
+clean_source = function(source)
+    if not is_file(source) then return false
+    copied = source.copy("/var", "system.log")
+    return copied == 1
+end function
+
+
+deployment_state = function()
+    file = globals.local_computer.File(DEPLOYMENT_PATH)
+    lines = read_lines(file)
+    if lines.len < 2 or lines[0].trim != DEPLOYMENT_HEADER then return null
+    fields = split_exact(lines[1], "|")
+    if fields.len != 5 or fields[0] != "T" then return null
+    state = {}
+    state.ip = fields[1]
+    state.port = fields[2].to_int
+    state.user = fields[3]
+    state.source = fields[4]
+    state.paths = []
+    for line in lines[2:]
+        parts = split_exact(line, "|")
+        if parts.len == 2 and parts[0] == "F" and parts[1] != "" then state.paths.push(parts[1])
+    end for
+    return state
+end function
+
+
+save_deployment = function(target, paths)
+    lines = [DEPLOYMENT_HEADER,
+        "T|" + target.ip + "|" + target.port + "|" + target.user + "|" + target.source]
+    for path in paths
+        lines.push("F|" + path)
+    end for
+    return write_lines(DEPLOYMENT_PATH, lines)
+end function
+
+
+delete_deployment_state = function()
+    file = globals.local_computer.File(DEPLOYMENT_PATH)
+    if not is_file(file) then return true
+    file.delete
+    return not is_file(globals.local_computer.File(DEPLOYMENT_PATH))
+end function
+
+
+same_target = function(target, state)
+    if target == null or state == null then return false
+    return target.ip == state.ip and target.port == state.port and target.user == state.user
+end function
+
+
+payload_report = function()
+    entries = load_payload
+    show_event("PAYLOAD MANIFEST", entries.len + " entries", COLOR_PURPLE, COLOR_PINK)
+    show_branch("path", PAYLOAD_PATH, COLOR_ORANGE)
+    present = 0
+    index = 1
+    for entry in entries
+        source = globals.local_computer.File(entry.source)
+        status = "MISSING"
+        color = COLOR_RED
+        if is_file(source) and not source.is_folder then
+            status = "READY"
+            color = COLOR_GREEN
+            present = present + 1
+        end if
+        show_indexed_event("PACKAGE", index, "manifest entry")
+        show_branch("source", entry.source, COLOR_PURPLE, "destination", entry.destination, COLOR_PURPLE)
+        show_branch("status", status, color)
+        index = index + 1
+    end for
+    ready_color = COLOR_GREEN
+    if present == 0 then ready_color = COLOR_RED
+    show_event("PAYLOAD READY", present + "/" + entries.len, ready_color, ready_color)
+    return entries.len > 0
+end function
+
+
+deploy_payload = function()
+    state = deployment_state
+    if state != null then
+        show_event("DEPLOYMENT REFUSED", "active ledger already exists", COLOR_RED, COLOR_ORANGE)
+        show_branch("target", state.ip + ":" + state.port, COLOR_CYAN, "tracked", state.paths.len, COLOR_PINK)
+        return false
+    end if
+    target = current_target
+    if target == null then
+        sequence = record_diag("autoroute handoff rejected", "state=" + globals.route_handoff_status)
+        show_event("HANDOFF UNAVAILABLE", "use setup for a manual fallback", COLOR_RED, COLOR_ORANGE, sequence)
+        show_branch("state", globals.route_handoff_status, COLOR_ORANGE)
+        return false
+    end if
+    entries = load_payload
+    if entries.len == 0 then
+        show_event("PAYLOAD UNAVAILABLE", "manifest has no valid entries", COLOR_RED, COLOR_ORANGE)
+        return false
+    end if
+    remote = connect_target(target)
+    if not is_shell(remote) then return false
+    cleaner = stage_clean_source(remote)
+    deployed = []
+    missing = 0
+    preserved = 0
+    failed = 0
+    show_event("DEPLOYMENT", "package start", COLOR_PURPLE, COLOR_DIM)
+    show_branch("target", target_identity(target), COLOR_CYAN, "entries", entries.len, COLOR_PINK)
+    package_index = 1
+    for entry in entries
+        source = globals.local_computer.File(entry.source)
+        if not is_file(source) or source.is_folder then
+            missing = missing + 1
+            show_indexed_event("PACKAGE", package_index, "skipped", COLOR_PURPLE, COLOR_ORANGE)
+            show_branch("source", entry.source, COLOR_PURPLE, "reason", "missing", COLOR_ORANGE)
+            package_index = package_index + 1
+            continue
+        end if
+        destination = ensure_folder_path_on(remote.host_computer, entry.destination)
+        if not is_file(destination) then
+            failed = failed + 1
+            show_indexed_event("PACKAGE", package_index, "destination failed", COLOR_RED, COLOR_RED)
+            show_branch("source", entry.source, COLOR_PURPLE, "destination", entry.destination, COLOR_PURPLE)
+            package_index = package_index + 1
+            continue
+        end if
+        remote_path = join_path(entry.destination, source.name)
+        if is_file(remote.host_computer.File(remote_path)) then
+            preserved = preserved + 1
+            show_indexed_event("PACKAGE", package_index, "preserve existing", COLOR_PURPLE, COLOR_ORANGE)
+            show_branch("path", remote_path, COLOR_PURPLE, "ownership", "pre-existing", COLOR_ORANGE)
+            package_index = package_index + 1
+            continue
+        end if
+        show_indexed_event("PACKAGE", package_index, "copy")
+        show_branch("source", entry.source, COLOR_PURPLE, "destination", remote_path, COLOR_PURPLE)
+        globals.local_shell.scp(entry.source, entry.destination, remote)
+        if is_file(remote.host_computer.File(remote_path)) then
+            deployed.push(remote_path)
+            show_branch("result", "DEPLOYED", COLOR_GREEN, "path", remote_path, COLOR_PURPLE)
+        else
+            failed = failed + 1
+            show_branch("result", "COPY FAILED", COLOR_RED, "path", remote_path, COLOR_PURPLE)
+        end if
+        package_index = package_index + 1
+    end for
+    clean_ok = clean_source(cleaner)
+    cleaner_path = "unavailable"
+    if is_file(cleaner) then cleaner_path = cleaner.path
+    cleanup_sequence = record_diag("target cleanup", "target=" + target_identity(target) +
+        " | source=" + cleaner_path + " | cleanup=" + clean_ok)
+    cleanup_detail = "log finalizer unavailable"
+    if clean_ok then cleanup_detail = "log finalizer complete"
+    show_event("CLEANUP", cleanup_detail, COLOR_ORANGE, value_color(clean_ok), cleanup_sequence)
+    show_branch("host", target_identity(target), COLOR_CYAN, "role", "target", COLOR_ORANGE)
+    show_branch("source", cleaner_path, COLOR_ORANGE, "order", 1, COLOR_PINK)
+
+    ledger_ok = true
+    if deployed.len > 0 then ledger_ok = save_deployment(target, deployed)
+    sequence = record_diag("deploy complete", "target=" + target_identity(target) + " | deployed=" + deployed.len +
+        " | missing=" + missing + " | preserved=" + preserved + " | failed=" + failed +
+        " | ledger=" + ledger_ok + " | cleanup=" + clean_ok)
+    result_label = "cycle complete"
+    result_color = COLOR_GREEN
+    if failed > 0 or not ledger_ok or not clean_ok then
+        result_label = "cycle partial"
+        result_color = COLOR_RED
+    end if
+    show_event("DEPLOYMENT RESULTS", result_label, COLOR_PURPLE, result_color, sequence)
+    show_branch("target", target_identity(target), COLOR_CYAN, "deployed", deployed.len, COLOR_GREEN)
+    show_branch("missing", missing, COLOR_ORANGE, "preserved", preserved, COLOR_ORANGE)
+    show_branch("failed", failed, value_color(failed, true), "ledger", ledger_ok, value_color(ledger_ok))
+    show_branch("cleanup", clean_ok, value_color(clean_ok))
+    if deployed.len == 0 then
+        show_event("NO NEW PAYLOAD", "nothing added to the target", COLOR_ORANGE, COLOR_ORANGE)
+        return false
+    end if
+    if not ledger_ok then
+        show_event("RESIDUAL RISK", "payload copied without a usable local ledger", COLOR_RED, COLOR_RED)
+        return false
+    end if
+    if failed == 0 and clean_ok then
+        show_event("AUTODEPLOY COMPLETE", "package retained", COLOR_GREEN, COLOR_GREEN)
+    else if failed == 0 then
+        show_event("RESIDUAL RISK", "package retained; target cleanup unavailable", COLOR_RED, COLOR_RED)
+    end if
+    return failed == 0 and ledger_ok
+end function
+
+
+direct_children = function(folder)
+    children = []
+    if not is_file(folder) or not folder.is_folder then return children
+    folders = folder.get_folders
+    if typeof(folders).lower == "list" then
+        for child in folders
+            children.push(child)
+        end for
+    else if is_file(folders) then
+        children.push(folders)
+    end if
+    files = folder.get_files
+    if typeof(files).lower == "list" then
+        for child in files
+            children.push(child)
+        end for
+    else if is_file(files) then
+        children.push(files)
+    end if
+    return children
+end function
+
+
+trash_roots = function(computer)
+    roots = []
+    root_trash = computer.File("/root/.Trash")
+    if is_file(root_trash) and root_trash.is_folder then roots.push(root_trash)
+    home = computer.File("/home")
+    if is_file(home) and home.is_folder then
+        users = home.get_folders
+        if typeof(users).lower != "list" then users = [users]
+        for user_folder in users
+            if not is_file(user_folder) then continue
+            trash = computer.File(join_path(user_folder.path, ".Trash"))
+            if is_file(trash) and trash.is_folder then roots.push(trash)
+        end for
+    end if
+    return roots
+end function
+
+
+purge_trash = function(computer)
+    roots = trash_roots(computer)
+    deleted = 0
+    failed = 0
+    for trash in roots
+        for child in direct_children(trash)
+            path = child.path
+            child.delete
+            if is_file(computer.File(path)) then failed = failed + 1 else deleted = deleted + 1
+        end for
+    end for
+    result = {}
+    result.roots = roots.len
+    result.deleted = deleted
+    result.failed = failed
+    return result
+end function
+
+
+retract_payload = function()
+    state = deployment_state
+    if state == null then
+        show_event("RETRACT UNAVAILABLE", "no active deployment ledger", COLOR_ORANGE, COLOR_ORANGE)
+        return false
+    end if
+    target = current_target
+    if not same_target(target, state) then
+        show_event("RETRACT REFUSED", "current handoff differs from recorded target", COLOR_RED, COLOR_RED)
+        show_branch("recorded", state.ip + ":" + state.port, COLOR_CYAN)
+        if target != null then show_branch("current", target_identity(target), COLOR_CYAN)
+        return false
+    end if
+    phrase = "RETRACT " + state.ip
+    show_event("ROWAN RECALL", "exact payload retract", COLOR_RED, COLOR_RED)
+    show_branch("target", state.ip + ":" + state.port, COLOR_CYAN, "tracked", state.paths.len, COLOR_PINK)
+    show_branch("family data", "/root/autoscripts", COLOR_ORANGE)
+    confirmation = user_input(paint("Type exactly ", COLOR_DIM) + paint(phrase, COLOR_RED) + paint(": ", COLOR_DIM))
+    if confirmation != phrase then
+        show_event("RETRACT CANCELLED", "confirmation did not match", COLOR_RED, COLOR_ORANGE)
+        return false
+    end if
+    remote = connect_target(target)
+    if not is_shell(remote) then return false
+    cleaner = stage_clean_source(remote)
+    removed = 0
+    absent = 0
+    failed = 0
+    show_event("RETRACT", "tracked payload start", COLOR_RED, COLOR_ORANGE)
+    show_branch("target", target_identity(target), COLOR_CYAN, "tracked", state.paths.len, COLOR_PINK)
+    package_index = 1
+    for path in state.paths
+        item = remote.host_computer.File(path)
+        if not is_file(item) then
+            absent = absent + 1
+            show_indexed_event("PACKAGE", package_index, "already absent", COLOR_PURPLE, COLOR_ORANGE)
+            show_branch("path", path, COLOR_ORANGE, "result", "ABSENT", COLOR_ORANGE)
+            package_index = package_index + 1
+            continue
+        end if
+        item.delete
+        if is_file(remote.host_computer.File(path)) then
+            failed = failed + 1
+            show_indexed_event("PACKAGE", package_index, "delete failed", COLOR_RED, COLOR_RED)
+            show_branch("path", path, COLOR_ORANGE, "result", "FAILED", COLOR_RED)
+        else
+            removed = removed + 1
+            show_indexed_event("PACKAGE", package_index, "removed", COLOR_PURPLE, COLOR_GREEN)
+            show_branch("path", path, COLOR_ORANGE, "result", "REMOVED", COLOR_GREEN)
+        end if
+        package_index = package_index + 1
+    end for
+    family_root = remote.host_computer.File("/root/autoscripts")
+    family_removed = false
+    if is_file(family_root) then
+        family_root.delete
+        family_removed = not is_file(remote.host_computer.File("/root/autoscripts"))
+    else
+        family_removed = true
+    end if
+    trash = purge_trash(remote.host_computer)
+    clean_ok = clean_source(cleaner)
+    cleaner_path = "unavailable"
+    if is_file(cleaner) then cleaner_path = cleaner.path
+    cleanup_sequence = record_diag("target cleanup", "target=" + target_identity(target) +
+        " | source=" + cleaner_path + " | cleanup=" + clean_ok)
+    cleanup_detail = "log finalizer unavailable"
+    if clean_ok then cleanup_detail = "log finalizer complete"
+    show_event("CLEANUP", cleanup_detail, COLOR_ORANGE, value_color(clean_ok), cleanup_sequence)
+    show_branch("host", target_identity(target), COLOR_CYAN, "role", "target", COLOR_ORANGE)
+    show_branch("source", cleaner_path, COLOR_ORANGE, "order", 1, COLOR_PINK)
+
+    retract_ok = failed == 0 and family_removed and trash.failed == 0 and clean_ok
+    ledger_removed = false
+    if retract_ok then ledger_removed = delete_deployment_state
+    if not ledger_removed then retract_ok = false
+    sequence = record_diag("retract complete", "target=" + target_identity(target) + " | removed=" + removed +
+        " | absent=" + absent + " | failed=" + failed + " | family_root=" + family_removed +
+        " | trash=" + trash.deleted + " | trash_failed=" + trash.failed + " | cleanup=" + clean_ok +
+        " | ledger_removed=" + ledger_removed)
+    result_detail = "cycle complete"
+    result_color = COLOR_GREEN
+    if not retract_ok then
+        result_detail = "cycle partial"
+        result_color = COLOR_RED
+    end if
+    show_event("ROWAN RECALL RESULTS", result_detail, COLOR_PURPLE, result_color, sequence)
+    show_branch("removed", removed, COLOR_GREEN, "absent", absent, COLOR_ORANGE)
+    show_branch("failed", failed, value_color(failed, true), "family data removed", family_removed, value_color(family_removed))
+    show_branch("trash roots", trash.roots, COLOR_CYAN, "entries purged", trash.deleted, COLOR_GREEN)
+    show_branch("trash failures", trash.failed, value_color(trash.failed, true), "cleanup", clean_ok, value_color(clean_ok))
+    show_branch("ledger removed", ledger_removed, value_color(ledger_removed))
+    if retract_ok then
+        show_event("PAYLOAD RETRACTED", "target clean", COLOR_GREEN, COLOR_GREEN)
+        return true
+    end if
+    show_event("RESIDUAL RISK", "review failed surfaces before collapse", COLOR_RED, COLOR_RED)
+    return false
+end function
+
+
+clean_target = function()
+    target = current_target
+    if target == null then
+        show_event("CLEANUP UNAVAILABLE", "no target", COLOR_RED, COLOR_RED)
+        return false
+    end if
+    remote = connect_target(target)
+    if not is_shell(remote) then return false
+    cleaner = stage_clean_source(remote)
+    ok = clean_source(cleaner)
+    cleaner_path = "unavailable"
+    if is_file(cleaner) then cleaner_path = cleaner.path
+    sequence = record_diag("clean complete", "target=" + target_identity(target) +
+        " | source=" + cleaner_path + " | cleanup=" + ok)
+    detail = "log finalizer unavailable"
+    if ok then detail = "log finalizer complete"
+    show_event("CLEANUP", detail, COLOR_ORANGE, value_color(ok), sequence)
+    show_branch("host", target_identity(target), COLOR_CYAN, "role", "target", COLOR_ORANGE)
+    show_branch("source", cleaner_path, COLOR_ORANGE, "order", 1, COLOR_PINK)
+    if ok then
+        show_branch("route cleanup", "owned by AutoRoute", COLOR_ORANGE)
+    end if
+    return ok
+end function
+
+
+status_report = function()
+    target = current_target
+    state = deployment_state
+    entries = load_payload
+    show_event("AUTODEPLOY STATUS", "current deployment state", COLOR_PURPLE, COLOR_DIM)
+    show_branch("manifest", PAYLOAD_PATH, COLOR_ORANGE, "entries", entries.len, COLOR_PINK)
+    if target == null then
+        show_event("HANDOFF UNAVAILABLE", "no AutoRoute or manual target", COLOR_RED, COLOR_RED)
+        show_branch("AutoRoute", globals.route_handoff_status, COLOR_ORANGE)
+    else
+        source_color = COLOR_ORANGE
+        if target.source == "autoroute" then source_color = COLOR_GREEN
+        show_event("HANDOFF READY", "deployment destination", COLOR_GREEN, COLOR_GREEN)
+        show_branch("target", target_identity(target), COLOR_CYAN, "source", target.source, source_color)
+        if target.source == "autoroute" then show_branch("AutoRoute", globals.route_handoff_status, COLOR_GREEN)
+    end if
+    if state == null then
+        show_event("DEPLOYMENT LEDGER", "empty", COLOR_PURPLE, COLOR_ORANGE)
+        return true
+    end if
+    show_event("DEPLOYMENT LEDGER", "active", COLOR_PURPLE, COLOR_GREEN)
+    show_branch("target", state.ip + ":" + state.port, COLOR_CYAN, "tracked", state.paths.len, COLOR_PINK)
+    if not same_target(target, state) then
+        show_event("LEDGER MISMATCH", "current handoff differs", COLOR_RED, COLOR_RED)
+        return false
+    end if
+    remote = connect_target(target)
+    if not is_shell(remote) then return false
+    cleaner = stage_clean_source(remote)
+    present = 0
+    missing = 0
+    package_index = 1
+    for path in state.paths
+        if is_file(remote.host_computer.File(path)) then
+            present = present + 1
+            show_indexed_event("PACKAGE", package_index, "present", COLOR_PURPLE, COLOR_GREEN)
+            show_branch("path", path, COLOR_PURPLE, "status", "PRESENT", COLOR_GREEN)
+        else
+            missing = missing + 1
+            show_indexed_event("PACKAGE", package_index, "missing", COLOR_PURPLE, COLOR_RED)
+            show_branch("path", path, COLOR_PURPLE, "status", "MISSING", COLOR_RED)
+        end if
+        package_index = package_index + 1
+    end for
+    clean_ok = clean_source(cleaner)
+    cleaner_path = "unavailable"
+    if is_file(cleaner) then cleaner_path = cleaner.path
+    sequence = record_diag("status complete", "target=" + target_identity(target) + " | present=" + present +
+        " | missing=" + missing + " | source=" + cleaner_path + " | cleanup=" + clean_ok)
+    result_detail = "payload verified"
+    result_color = COLOR_GREEN
+    if missing > 0 or not clean_ok then
+        result_detail = "payload incomplete"
+        result_color = COLOR_RED
+    end if
+    show_event("STATUS RESULTS", result_detail, COLOR_PURPLE, result_color, sequence)
+    show_branch("present", present + "/" + state.paths.len, COLOR_GREEN,
+        "missing", missing, value_color(missing, true))
+    show_branch("cleanup", clean_ok, value_color(clean_ok))
+    return missing == 0 and clean_ok
+end function
+
+
+show_banner = function()
+    print("           " + paint("◆", COLOR_PINK) + "                 " + paint("◆", COLOR_CYAN))
+    print("           " + paint("│", COLOR_PURPLE) + "                 " + paint("│", COLOR_CYAN))
+    print(paint("◆──────────┴───╮", COLOR_PURPLE) + "     " + paint("╭───────┴──────◆", COLOR_CYAN))
+    print(paint("│              ╰──", COLOR_PURPLE) + paint("◆", COLOR_GREEN) + paint("──╯              │", COLOR_CYAN))
+    print(paint("│        ╭──────────────────╮       ", COLOR_PURPLE) + paint("│", COLOR_CYAN))
+    print(paint("╰────────┤    ", COLOR_PURPLE) + paint("AUTODEPLOY", COLOR_PINK) + paint("    ├───────╯", COLOR_CYAN))
+    print(paint("         ╰─────────┬────────╯", COLOR_PURPLE))
+    print(paint("◆──────────────────◆──────────────────◆", COLOR_CYAN))
+    print("        " + paint("PACKAGE", COLOR_PURPLE) + "  " + paint("ROUTE", COLOR_GREEN) + "  " + paint("RECALL", COLOR_ORANGE))
+    print("      " + paint("ROWAN CIRCUIT // " + SCRIPT_VERSION, COLOR_PURPLE))
+end function
+
+
+show_runtime_paths = function()
+    show_event("TASK QUEUE", TASK_ROOT, COLOR_PURPLE, COLOR_ORANGE)
+    show_event("DIAGNOSTICS", LOG_ROOT, COLOR_PURPLE, COLOR_ORANGE)
+    show_event("AUTOROUTE HANDOFF", ACTIVE_PROXY_ROUTE_PATH, COLOR_GREEN, COLOR_ORANGE)
+    show_event("DEPLOYMENT LEDGER", DEPLOYMENT_PATH, COLOR_PURPLE, COLOR_ORANGE)
+end function
+
+
+show_help = function()
+    print("")
+    print(paint("AutoDeploy " + SCRIPT_VERSION, COLOR_PURPLE) + paint(" — payload lifecycle controller", COLOR_DIM))
+    print(paint("Deploys an editable package to an AutoRoute handoff or manual SSH target.", COLOR_DIM))
+    print(paint("Missing local files are skipped; existing remote files are preserved and never claimed.", COLOR_DIM))
+    print("")
+    print(paint("  deploy", COLOR_GREEN) + paint("              deploy configured payload to the final proxy", COLOR_DIM))
+    print(paint("  status", COLOR_CYAN) + paint("              inspect handoff, ledger, and remote payload", COLOR_DIM))
+    print(paint("  retract", COLOR_RED) + paint("             remove tracked files, family data, trash, then logs", COLOR_DIM))
+    print(paint("  clean", COLOR_ORANGE) + paint("               replace the current target computer log", COLOR_DIM))
+    print(paint("  payload", COLOR_PURPLE) + paint("             list editable payload entries and readiness", COLOR_DIM))
+    print(paint("  setup", COLOR_ORANGE) + paint("               save a manual SSH fallback target", COLOR_DIM))
+    print(paint("  help", COLOR_PURPLE) + paint("                show this help", COLOR_DIM))
+    print(paint("  quit", COLOR_RED) + paint("                leave AutoDeploy", COLOR_DIM))
+    print("")
+    show_branch("AutoRoute handoff", ACTIVE_PROXY_ROUTE_PATH, COLOR_ORANGE)
+    show_branch("editable manifest", PAYLOAD_PATH, COLOR_ORANGE)
+    show_branch("deployment ledger", DEPLOYMENT_PATH, COLOR_ORANGE)
+end function
+
+
+origin_identity = function()
+    if not is_computer(globals.local_computer) then return "unknown"
+    return globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+end function
+
+
+require_pin = function()
+    if PIN == "" then
+        show_event("AUTODEPLOY LOCKED", "configure PIN in the source", COLOR_RED, COLOR_ORANGE)
+        return false
+    end if
+    print(paint("╭─◆ AUTODEPLOY ◆─", COLOR_PURPLE) + paint("[PIN REQUIRED]", COLOR_ORANGE))
+    entered = user_input(paint("╰─ORIGIN ", COLOR_ORANGE) + paint(origin_identity, COLOR_CYAN) +
+        paint(" ─▶ ENTER PIN ─▶ ", COLOR_GREEN), 1)
+    if entered != PIN then
+        show_event("AUTHORITY DENIED", "invalid PIN", COLOR_RED, COLOR_RED)
+        return false
+    end if
+    show_event("AUTHORITY", "PIN accepted", COLOR_PURPLE, COLOR_GREEN)
+    return true
+end function
+
+
+console_prompt = function()
+    target = current_target
+    state = deployment_state
+    target_text = "NO TARGET"
+    target_color = COLOR_RED
+    if target != null then
+        target_text = target_identity(target)
+        target_color = COLOR_CYAN
+    end if
+    ledger = "EMPTY"
+    ledger_color = COLOR_ORANGE
+    if state != null then
+        ledger = "TRACKED " + state.paths.len
+        ledger_color = COLOR_GREEN
+    end if
+    handoff = "NONE"
+    handoff_color = COLOR_RED
+    if target != null then
+        handoff = "MANUAL"
+        handoff_color = COLOR_ORANGE
+        if target.source == "autoroute" then
+            handoff = "AUTOROUTE"
+            handoff_color = COLOR_GREEN
+        end if
+    end if
+    print(paint("╭─◆ AUTODEPLOY ◆─", COLOR_PURPLE) + paint("[PACKAGE " + ledger + "]", ledger_color) +
+        "─" + paint("[HANDOFF " + handoff + "]", handoff_color))
+    return paint("╰─ORIGIN ", COLOR_ORANGE) + paint(origin_identity, COLOR_CYAN) +
+        paint(" ─▶ TARGET ", COLOR_GREEN) + paint(target_text, target_color) + paint(" ─▶ ", COLOR_GREEN)
+end function
+
+
+words_from_line = function(line)
+    words = []
+    for word in line.split(" ")
+        word = word.trim
+        if word != "" then words.push(word)
+    end for
+    return words
+end function
+
+
+run_command = function(words)
+    if words.len == 0 then return true
+    command = words[0].lower
+    if command == "deploy" then
+        deploy_payload
+    else if command == "status" then
+        status_report
+    else if command == "retract" then
+        retract_payload
+    else if command == "clean" or command == "clog" or command == "logs" then
+        clean_target
+    else if command == "payload" then
+        payload_report
+    else if command == "setup" then
+        setup_target
+    else if command == "help" or command == "-h" or command == "--help" then
+        show_help
+    else if command == "quit" or command == "exit" then
+        return false
+    else
+        show_event("UNKNOWN COMMAND", command, COLOR_RED, COLOR_PINK)
+        show_branch("next", "help", COLOR_PURPLE)
+    end if
+    return true
+end function
+
+
+globals.local_shell = get_shell
+globals.local_computer = globals.local_shell.host_computer
+globals.log_sequence = 0
+globals.route_handoff_status = "not checked"
+globals.payload_manifest_migrated = false
+
+if not init_layout then exit("AutoDeploy could not create /root/autoscripts/autodeploy.")
+if not ensure_payload_manifest then exit("AutoDeploy payload manifest is invalid.")
+
+show_banner
+show_runtime_paths
+if not require_pin then exit("AutoDeploy activation denied.")
+if not migrate_payload_manifest then exit("AutoDeploy could not upgrade the payload manifest.")
+if globals.payload_manifest_migrated then
+    sequence = record_diag("payload manifest upgraded", "legacy=/bin/autocred | current=/bin/autocredential")
+    show_event("PAYLOAD MANIFEST", "legacy entry upgraded", COLOR_PURPLE, COLOR_GREEN, sequence)
+    show_branch("legacy", "/bin/autocred", COLOR_ORANGE, "current", "/bin/autocredential", COLOR_PURPLE)
+end if
+sequence = record_diag("startup", "host=" + origin_identity + " | version=" + SCRIPT_VERSION)
+show_event("STARTUP", "controller ready", COLOR_PURPLE, COLOR_GREEN, sequence)
+show_branch("host", origin_identity, COLOR_CYAN, "version", SCRIPT_VERSION, COLOR_CYAN)
+
+keep_running = true
+if params.len > 0 then keep_running = run_command(params)
+if params.len == 0 then show_help
+while keep_running
+    line = user_input(console_prompt).trim
+    keep_running = run_command(words_from_line(line))
+end while
+deployment_label = ["none", "active"][deployment_state != null]
+sequence = record_diag("shutdown", "deployment=" + deployment_label)
+deployment_color = COLOR_ORANGE
+if deployment_label == "active" then deployment_color = COLOR_GREEN
+show_event("SHUTDOWN", "controller closed", COLOR_PURPLE, COLOR_DIM, sequence)
+show_branch("deployment", deployment_label, deployment_color)

@@ -1,0 +1,564 @@
+//Made By Hobo & Rowan
+// AutoTrash 1.1.1 for Grey Hack Public v0.9.6773.
+// Fast, account-aware trash cleanup with the Auto Family interface.
+//
+// Usage:
+//   autotrash
+//   autotrash preview
+//   autotrash help
+//
+// Running as root cleans /root/.Trash and conventional /home/<account>/.Trash
+// folders. Other users clean only their own conventional home trash. AutoTrash
+// preserves every .Trash folder and never accepts an arbitrary target path.
+
+SCRIPT_VERSION = "1.1.1"
+
+// Personal activation PIN. The GitHub-ready source leaves this blank.
+PIN = ""
+
+ROOT_TRASH = "/root/.Trash"
+HOME_ROOT = "/home"
+TRASH_NAME = ".Trash"
+PROGRESS_INTERVAL = 25
+APP_ROOT = "/root/autoscripts/autotrash"
+LOG_ROOT = APP_ROOT + "/logs"
+LOG_PATH = LOG_ROOT + "/latest.txt"
+
+COLOR_PURPLE = "#D86CFF"
+COLOR_CYAN = "#55E7FF"
+COLOR_GREEN = "#63FF9B"
+COLOR_RED = "#FF5C7C"
+COLOR_ORANGE = "#FFB86B"
+COLOR_PINK = "#FF79C6"
+COLOR_LAVENDER = "#C7A7E8"
+COLOR_DIM = "#A79BC8"
+
+paint = function(value, color)
+    return "<color=" + color + ">" + str(value) + "</color>"
+end function
+
+args = params
+if args == null then args = []
+if args.len > 1 then exit(paint("AUTOTRASH ERROR", COLOR_RED) + " too many arguments")
+
+mode = "clean"
+if args.len == 1 then
+    arg = args[0].trim.lower
+    if arg == "help" or arg == "-h" or arg == "--help" then
+        mode = "help"
+    else if arg == "preview" or arg == "--dry-run" then
+        mode = "preview"
+    else if arg != "clean" then
+        exit(paint("AUTOTRASH ERROR", COLOR_RED) + " expected preview, --dry-run, clean, or help")
+    end if
+end if
+
+shell = get_shell
+if shell == null then exit(paint("AUTOTRASH ERROR", COLOR_RED) + " no active shell")
+
+computer = shell.host_computer
+if computer == null then exit(paint("AUTOTRASH ERROR", COLOR_RED) + " no host computer")
+
+isFileObject = function(value)
+    return typeof(value).lower == "file"
+end function
+
+joinPath = function(folder, name)
+    if folder == "/" then return "/" + name
+    return folder + "/" + name
+end function
+
+isDirectChild = function(rootPath, childPath)
+    if typeof(childPath) != "string" then return false
+    prefix = rootPath + "/"
+    if childPath.indexOf(prefix) != 0 then return false
+    relative = childPath[prefix.len:]
+    if relative.len == 0 then return false
+    return relative.indexOf("/") == null
+end function
+
+
+ensureFolderPath = function(path)
+    current = "/"
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        nextPath = joinPath(current, part)
+        item = computer.File(nextPath)
+        if isFileObject(item) then
+            if not item.is_folder then return null
+        else
+            if computer.create_folder(current, part) != 1 then return null
+            item = computer.File(nextPath)
+            if not isFileObject(item) then return null
+        end if
+        current = nextPath
+    end for
+    return computer.File(path)
+end function
+
+
+ensureTextFile = function(path)
+    file = computer.File(path)
+    if isFileObject(file) then
+        if file.is_folder or file.is_binary then return null
+        return file
+    end if
+    parts = path.split("/")
+    name = parts[-1]
+    parent = path[0 : path.len - name.len - 1]
+    if parent == "" then parent = "/"
+    if not isFileObject(ensureFolderPath(parent)) then return null
+    if computer.touch(parent, name) != 1 then return null
+    file = computer.File(path)
+    if not isFileObject(file) then return null
+    return file
+end function
+
+
+initDiagnostics = function()
+    if not isFileObject(ensureFolderPath(LOG_ROOT)) then return false
+    file = ensureTextFile(LOG_PATH)
+    if not isFileObject(file) then return false
+    return file.set_content("") == 1
+end function
+
+
+recordDiag = function(label, detail = "")
+    globals.log_sequence = globals.log_sequence + 1
+    plain = "[ATLOG " + globals.log_sequence + "] " + label
+    if detail != "" then plain = plain + " | " + detail
+    file = ensureTextFile(LOG_PATH)
+    if not isFileObject(file) then return globals.log_sequence
+    existing = file.get_content
+    if typeof(existing).lower != "string" then existing = ""
+    if existing != "" then existing = existing + char(10)
+    file.set_content(existing + plain)
+    return globals.log_sequence
+end function
+
+
+showEvent = function(label, detail = "", labelColor = "", detailColor = "", sequence = 0)
+    if labelColor == "" then labelColor = COLOR_PURPLE
+    if detailColor == "" then detailColor = COLOR_DIM
+    line = paint("◆ " + label, labelColor)
+    if sequence > 0 then line = line + " " + paint("[ATLOG " + sequence + "]", COLOR_DIM)
+    if detail != "" then line = line + "  " + paint(detail, detailColor)
+    print(line)
+end function
+
+
+showIndexedEvent = function(label, index, detail = "", labelColor = "", detailColor = "")
+    if labelColor == "" then labelColor = COLOR_PURPLE
+    if detailColor == "" then detailColor = COLOR_DIM
+    line = paint("◆ " + label, labelColor) + " " + paint("[" + index + "]", COLOR_PINK)
+    if detail != "" then line = line + "  " + paint(detail, detailColor)
+    print(line)
+end function
+
+
+showBranch = function(labelA, valueA, colorA, labelB = "", valueB = "", colorB = "")
+    if colorB == "" then colorB = COLOR_DIM
+    line = paint("  ╰ " + labelA + "=", COLOR_DIM) + paint(valueA, colorA)
+    if labelB != "" then
+        line = line + paint("  |  " + labelB + "=", COLOR_DIM) + paint(valueB, colorB)
+    end if
+    print(line)
+end function
+
+
+valueColor = function(value, failureWhenPositive = false)
+    if failureWhenPositive then
+        if value > 0 then return COLOR_RED
+        return COLOR_GREEN
+    end if
+    if value then return COLOR_GREEN
+    return COLOR_RED
+end function
+
+
+originIdentity = function()
+    return computer.public_ip + "/" + computer.local_ip
+end function
+
+
+scopeIdentity = function()
+    if active_user == "root" then return "ROOT + HOME ACCOUNTS"
+    return "/home/" + active_user + "/.Trash"
+end function
+
+
+modeColor = function()
+    if mode == "clean" then return COLOR_RED
+    if mode == "preview" then return COLOR_ORANGE
+    return COLOR_PURPLE
+end function
+
+
+showCircuit = function()
+    print("")
+    print(paint("◆ ROOT ─────────╮", COLOR_PINK))
+    print("                " + paint("├──────╮", COLOR_PURPLE))
+    print(paint("◆ HOME ─────────╯", COLOR_CYAN) + "      " + paint("│", COLOR_PURPLE))
+    print("            " + paint("╭──────────┴──╮", COLOR_PURPLE))
+    print("            " + paint("│  ", COLOR_PURPLE) + paint("AUTOTRASH", COLOR_PINK) +
+        paint("  ├─────◆", COLOR_GREEN))
+    print("            " + paint("╰──────┬──────╯", COLOR_PURPLE))
+    print("                   " + paint("│", COLOR_ORANGE))
+    print("              " + paint("◆────┴────◆", COLOR_GREEN))
+    print("              " + paint("PRESERVE", COLOR_GREEN) + "  " + paint("EMPTY", COLOR_ORANGE))
+    print(paint("ROWAN CIRCUIT // ", COLOR_PURPLE) + paint(SCRIPT_VERSION, COLOR_CYAN))
+end function
+
+
+showHelp = function()
+    print("")
+    print(paint("AutoTrash ", COLOR_PURPLE) + paint(SCRIPT_VERSION, COLOR_CYAN) +
+        paint(" — bounded account-trash cleanup", COLOR_DIM))
+    print(paint("AutoTrash handles ", COLOR_DIM) +
+        paint("scope discovery, boundary validation, cleanup, and verification", COLOR_GREEN))
+    print(paint("It never accepts ", COLOR_DIM) +
+        paint("an arbitrary path or deletion of a .Trash root", COLOR_RED))
+    print("")
+    print(paint("Commands", COLOR_PURPLE))
+    print("  " + paint("clean", COLOR_RED) + "                 empty the permitted account trash scope")
+    print("  " + paint("preview / --dry-run", COLOR_ORANGE) + " show every direct deletion target without changing it")
+    print("  " + paint("help / -h / --help", COLOR_CYAN) + "  show this guide")
+    print("")
+    print(paint("Scope", COLOR_PURPLE))
+    print("  " + paint("root", COLOR_PINK) + "      /root/.Trash plus direct /home/<account>/.Trash folders")
+    print("  " + paint("non-root", COLOR_PINK) + "  only /home/<active-user>/.Trash")
+    print("  " + paint("preserved", COLOR_GREEN) + " every approved .Trash root remains in place")
+end function
+
+
+showRuntimePaths = function()
+    showEvent("DIAGNOSTICS", LOG_PATH, COLOR_PURPLE, COLOR_ORANGE)
+end function
+
+
+requirePin = function()
+    if PIN == "" then
+        showEvent("AUTOTRASH LOCKED", "configure PIN in the source", COLOR_RED, COLOR_ORANGE)
+        return false
+    end if
+    print(paint("╭─◆ AUTOTRASH ◆─", COLOR_PURPLE) + paint("[PIN REQUIRED]", COLOR_ORANGE))
+    entered = user_input(paint("╰─ORIGIN ", COLOR_ORANGE) + paint(originIdentity, COLOR_CYAN) +
+        paint(" ─▶ ENTER PIN ─▶ ", COLOR_GREEN), 1)
+    if entered != PIN then
+        showEvent("AUTHORITY DENIED", "invalid PIN", COLOR_RED, COLOR_RED)
+        return false
+    end if
+    sequence = recordDiag("authority", "pin accepted | user=" + active_user)
+    showEvent("AUTHORITY", "PIN accepted", COLOR_PURPLE, COLOR_GREEN, sequence)
+    return true
+end function
+
+
+globals.log_sequence = 0
+showCircuit
+diagnosticsReady = initDiagnostics
+if diagnosticsReady then
+    showRuntimePaths
+else
+    showEvent("DIAGNOSTICS UNAVAILABLE", LOG_PATH, COLOR_ORANGE, COLOR_ORANGE)
+end if
+if not requirePin then exit("AutoTrash activation denied.")
+showHelp
+if mode == "help" then exit
+sequence = recordDiag("startup", "host=" + originIdentity + " | user=" + active_user + " | mode=" + mode)
+showEvent("STARTUP", "account trash controller ready", COLOR_PURPLE, COLOR_GREEN, sequence)
+showBranch("host", computer.get_name, COLOR_CYAN, "user", active_user, COLOR_PINK)
+showBranch("mode", mode, modeColor, "scope", scopeIdentity, COLOR_ORANGE)
+
+trashPaths = []
+stats = {
+    "discovery": 0,
+    "files": 0,
+    "folders": 0,
+    "links": 0,
+    "link_api": 0,}
+
+addTrashPath = function(path, trashPaths, stats)
+    trash = computer.File(path)
+    if not isFileObject(trash) then return
+    if trash.path != path then
+        sequence = recordDiag("boundary refused", "requested=" + path + " | resolved=" + str(trash.path))
+        showEvent("BOUNDARY REFUSED", "trash root mismatch", COLOR_RED, COLOR_RED, sequence)
+        showBranch("requested", path, COLOR_ORANGE, "resolved", str(trash.path), COLOR_ORANGE)
+        stats["discovery"] = stats["discovery"] + 1
+        return
+    end if
+    if trash.is_folder != 1 then
+        sequence = recordDiag("boundary refused", "not-folder=" + path)
+        showEvent("BOUNDARY REFUSED", "trash root is not a folder", COLOR_RED, COLOR_RED, sequence)
+        showBranch("path", path, COLOR_ORANGE, "type", "non-folder", COLOR_CYAN)
+        stats["discovery"] = stats["discovery"] + 1
+        return
+    end if
+    if trash.hasIndex("is_symlink") then
+        if trash.is_symlink == 1 then
+            sequence = recordDiag("boundary refused", "symlink-root=" + path)
+            showEvent("BOUNDARY REFUSED", "trash root is a symlink", COLOR_RED, COLOR_RED, sequence)
+            showBranch("path", path, COLOR_ORANGE, "type", "symlink", COLOR_CYAN)
+            stats["discovery"] = stats["discovery"] + 1
+            return
+        end if
+    end if
+    if trashPaths.indexOf(path) == null then trashPaths.push(path)
+end function
+
+if active_user == "root" then
+    addTrashPath(ROOT_TRASH, trashPaths, stats)
+
+    home = computer.File(HOME_ROOT)
+    if isFileObject(home) and home.is_folder == 1 then
+        accounts = home.get_folders
+        if typeof(accounts) == "list" then
+            for account in accounts
+                if not isFileObject(account) then
+                    stats["discovery"] = stats["discovery"] + 1
+                    continue
+                end if
+                expected = joinPath(HOME_ROOT, account.name)
+                if account.path != expected or account.name.len == 0 or account.name.indexOf("/") != null then
+                    sequence = recordDiag("boundary refused", "unexpected-home-entry=" + str(account.path))
+                    showEvent("BOUNDARY REFUSED", "unexpected home entry", COLOR_RED, COLOR_RED, sequence)
+                    showBranch("path", str(account.path), COLOR_ORANGE)
+                    stats["discovery"] = stats["discovery"] + 1
+                    continue
+                end if
+                addTrashPath(joinPath(expected, TRASH_NAME), trashPaths, stats)
+            end for
+        else
+            sequence = recordDiag("scan error", "cannot-enumerate=" + HOME_ROOT)
+            showEvent("SCAN ERROR", "home enumeration unavailable", COLOR_RED, COLOR_RED, sequence)
+            showBranch("path", HOME_ROOT, COLOR_ORANGE)
+            stats["discovery"] = stats["discovery"] + 1
+        end if
+    end if
+else
+    addTrashPath(joinPath(joinPath(HOME_ROOT, str(active_user)), TRASH_NAME), trashPaths, stats)
+end if
+
+trashPaths.sort
+
+if trashPaths.len == 0 and stats["discovery"] == 0 then
+    sequence = recordDiag("scope empty", "no conventional trash root")
+    showEvent("TRASH ALREADY EMPTY", "no conventional trash root", COLOR_GREEN, COLOR_GREEN, sequence)
+    showBranch("scope", scopeIdentity, COLOR_ORANGE)
+    exit
+end if
+
+targets = {}
+
+addTarget = function(child, trashPath, expectedFolder, targets, stats)
+    if not isFileObject(child) then
+        stats["discovery"] = stats["discovery"] + 1
+        return
+    end if
+
+    childPath = child.path
+    if not isDirectChild(trashPath, childPath) then
+        sequence = recordDiag("boundary refused", "non-child=" + str(childPath) + " | root=" + trashPath)
+        showEvent("BOUNDARY REFUSED", "entry is not a direct child", COLOR_RED, COLOR_RED, sequence)
+        showBranch("entry", str(childPath), COLOR_ORANGE, "root", trashPath, COLOR_ORANGE)
+        stats["discovery"] = stats["discovery"] + 1
+        return
+    end if
+
+    isFolder = child.is_folder == 1
+    if expectedFolder and not isFolder then
+        sequence = recordDiag("scan error", "folder-list-non-folder=" + childPath)
+        showEvent("SCAN ERROR", "folder listing returned a non-folder", COLOR_RED, COLOR_RED, sequence)
+        showBranch("path", childPath, COLOR_ORANGE, "type", "non-folder", COLOR_CYAN)
+        stats["discovery"] = stats["discovery"] + 1
+        return
+    end if
+    if not expectedFolder and isFolder then
+        sequence = recordDiag("scan error", "file-list-folder=" + childPath)
+        showEvent("SCAN ERROR", "file listing returned a folder", COLOR_RED, COLOR_RED, sequence)
+        showBranch("path", childPath, COLOR_ORANGE, "type", "folder", COLOR_CYAN)
+        stats["discovery"] = stats["discovery"] + 1
+        return
+    end if
+
+    kind = "FILE"
+    if isFolder then kind = "FOLDER"
+    if child.hasIndex("is_symlink") then
+        stats["link_api"] = 1
+        if child.is_symlink == 1 then kind = "LINK"
+    end if
+
+    if targets.hasIndex(childPath) then
+        sequence = recordDiag("scan error", "duplicate-child=" + childPath)
+        showEvent("SCAN ERROR", "duplicate direct child", COLOR_RED, COLOR_RED, sequence)
+        showBranch("path", childPath, COLOR_ORANGE)
+        stats["discovery"] = stats["discovery"] + 1
+        return
+    end if
+
+    targets[childPath] = {
+        "kind": kind,
+        "trash": trashPath,}
+    if kind == "FILE" then stats["files"] = stats["files"] + 1
+    if kind == "FOLDER" then stats["folders"] = stats["folders"] + 1
+    if kind == "LINK" then stats["links"] = stats["links"] + 1
+end function
+
+for trashPath in trashPaths
+    trash = computer.File(trashPath)
+    if not isFileObject(trash) or trash.is_folder != 1 or trash.path != trashPath then
+        sequence = recordDiag("scan error", "trash-root-changed=" + trashPath)
+        showEvent("SCAN ERROR", "trash root changed during preparation", COLOR_RED, COLOR_RED, sequence)
+        showBranch("path", trashPath, COLOR_ORANGE)
+        stats["discovery"] = stats["discovery"] + 1
+        continue
+    end if
+
+    files = trash.get_files
+    folders = trash.get_folders
+    if typeof(files) != "list" or typeof(folders) != "list" then
+        sequence = recordDiag("scan error", "cannot-enumerate=" + trashPath)
+        showEvent("SCAN ERROR", "trash enumeration unavailable", COLOR_RED, COLOR_RED, sequence)
+        showBranch("path", trashPath, COLOR_ORANGE)
+        stats["discovery"] = stats["discovery"] + 1
+        continue
+    end if
+
+    for child in files
+        addTarget(child, trashPath, false, targets, stats)
+    end for
+    for child in folders
+        addTarget(child, trashPath, true, targets, stats)
+    end for
+end for
+
+paths = targets.indexes
+paths.sort
+
+sequence = recordDiag("scope discovery", "trashes=" + trashPaths.len + " | entries=" + paths.len +
+    " | files=" + stats["files"] + " | folders=" + stats["folders"] + " | links=" + stats["links"])
+showEvent("CLEANUP SCOPE", "discovery complete", COLOR_PURPLE, COLOR_GREEN, sequence)
+showBranch("trashes", trashPaths.len, COLOR_PINK, "entries", paths.len, COLOR_PINK)
+showBranch("files", stats["files"], COLOR_CYAN, "folders", stats["folders"], COLOR_CYAN)
+showBranch("links", stats["links"], COLOR_CYAN, "mode", mode, modeColor)
+rootIndex = 0
+for trashPath in trashPaths
+    showIndexedEvent("TRASH ROOT", rootIndex, trashPath, COLOR_PURPLE, COLOR_ORANGE)
+    rootIndex = rootIndex + 1
+end for
+
+if stats["link_api"] == 0 then
+    sequence = recordDiag("runtime notice", "is_symlink unavailable | traversal=direct-children")
+    showEvent("RUNTIME NOTICE", "symlink classification unavailable", COLOR_ORANGE, COLOR_ORANGE, sequence)
+    showBranch("traversal", "direct children only", COLOR_GREEN, "boundary", "exact paths", COLOR_GREEN)
+end if
+
+if stats["discovery"] > 0 then
+    sequence = recordDiag("cleanup refused", "preparation-issues=" + stats["discovery"] + " | deleted=0")
+    showEvent("AUTOTRASH REFUSED", "preparation blocked", COLOR_RED, COLOR_RED, sequence)
+    showBranch("issues", stats["discovery"], COLOR_RED, "deleted", 0, COLOR_GREEN)
+    exit
+end if
+
+if mode == "preview" then
+    sequence = recordDiag("preview", "entries=" + paths.len + " | changes=0")
+    showEvent("PREVIEW ONLY", "no filesystem changes", COLOR_ORANGE, COLOR_GREEN, sequence)
+    previewIndex = 0
+    for path in paths
+        showIndexedEvent("TARGET", previewIndex, targets[path]["kind"], COLOR_PURPLE, COLOR_CYAN)
+        showBranch("path", path, COLOR_ORANGE)
+        previewIndex = previewIndex + 1
+    end for
+    showEvent("PREVIEW COMPLETE", paths.len + " target(s) inspected", COLOR_GREEN, COLOR_GREEN)
+    exit
+end if
+
+if paths.len == 0 then
+    sequence = recordDiag("cleanup complete", "entries=0 | roots-preserved=" + trashPaths.len)
+    showEvent("TRASH ALREADY EMPTY", "nothing to delete", COLOR_GREEN, COLOR_GREEN, sequence)
+    showBranch("roots preserved", trashPaths.len, COLOR_GREEN, "entries", 0, COLOR_GREEN)
+    exit
+end if
+
+sequence = recordDiag("cleanup start", "entries=" + paths.len + " | roots=" + trashPaths.len)
+showEvent("CLEANUP", "direct-child deletion started", COLOR_ORANGE, COLOR_ORANGE, sequence)
+showBranch("entries", paths.len, COLOR_PINK, "roots preserved", trashPaths.len, COLOR_GREEN)
+showBranch("folder behavior", "recursive game deletion", COLOR_ORANGE)
+
+deletedCount = 0
+missingCount = 0
+failedCount = 0
+processedCount = 0
+nextProgress = PROGRESS_INTERVAL
+
+for path in paths
+    processedCount = processedCount + 1
+    record = targets[path]
+    current = computer.File(path)
+
+    if not isFileObject(current) then
+        missingCount = missingCount + 1
+    else if current.path != path or not isDirectChild(record["trash"], current.path) then
+        sequence = recordDiag("boundary refused", "changed-target=" + path)
+        showEvent("BOUNDARY REFUSED", "target changed before deletion", COLOR_RED, COLOR_RED, sequence)
+        showBranch("path", path, COLOR_ORANGE)
+        failedCount = failedCount + 1
+    else
+        result = current.delete
+        if not isFileObject(computer.File(path)) then
+            deletedCount = deletedCount + 1
+        else
+            sequence = recordDiag("delete failed", "path=" + path + " | result=" + str(result))
+            showEvent("DELETE FAILED", "target remains", COLOR_RED, COLOR_RED, sequence)
+            showBranch("path", path, COLOR_ORANGE, "result", str(result), COLOR_RED)
+            failedCount = failedCount + 1
+        end if
+    end if
+
+    if processedCount >= nextProgress or processedCount == paths.len then
+        showEvent("PROGRESS", processedCount + "/" + paths.len, COLOR_PURPLE, COLOR_GREEN)
+        nextProgress = nextProgress + PROGRESS_INTERVAL
+    end if
+end for
+
+remainingCount = 0
+verificationIssues = 0
+for trashPath in trashPaths
+    trash = computer.File(trashPath)
+    if not isFileObject(trash) or trash.is_folder != 1 or trash.path != trashPath then
+        sequence = recordDiag("verification error", "root-not-preserved=" + trashPath)
+        showEvent("VERIFY ERROR", "trash root was not preserved", COLOR_RED, COLOR_RED, sequence)
+        showBranch("path", trashPath, COLOR_ORANGE)
+        verificationIssues = verificationIssues + 1
+        continue
+    end if
+    files = trash.get_files
+    folders = trash.get_folders
+    if typeof(files) != "list" or typeof(folders) != "list" then
+        sequence = recordDiag("verification error", "cannot-inspect=" + trashPath)
+        showEvent("VERIFY ERROR", "trash root inspection unavailable", COLOR_RED, COLOR_RED, sequence)
+        showBranch("path", trashPath, COLOR_ORANGE)
+        verificationIssues = verificationIssues + 1
+    else
+        remainingCount = remainingCount + files.len + folders.len
+    end if
+end for
+
+sequence = recordDiag("results", "deleted=" + deletedCount + " | missing=" + missingCount +
+    " | failed=" + failedCount + " | remaining=" + remainingCount +
+    " | verification=" + verificationIssues)
+print("")
+showEvent("AUTOTRASH RESULTS", "cleanup complete", COLOR_PURPLE, COLOR_GREEN, sequence)
+showBranch("deleted", deletedCount, COLOR_GREEN, "missing", missingCount, COLOR_ORANGE)
+showBranch("failed", failedCount, valueColor(failedCount, true),
+    "remaining", remainingCount, valueColor(remainingCount, true))
+showBranch("verification", verificationIssues, valueColor(verificationIssues, true),
+    "roots preserved", trashPaths.len - verificationIssues, COLOR_GREEN)
+
+if failedCount > 0 or remainingCount > 0 or verificationIssues > 0 then
+    showEvent("RESULT INCOMPLETE", "review the reported paths", COLOR_RED, COLOR_RED)
+else
+    showEvent("TRASH CLEAN", "every discovered root preserved and emptied", COLOR_GREEN, COLOR_GREEN)
+end if

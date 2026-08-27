@@ -1,11 +1,11 @@
 //Made By Hobo & Rowan
-// AutoHack 2.5.0 retained-access, exact-LAN discovery, embedded deep
+// AutoHack 3.0.0 retained-access, exact-LAN discovery, embedded deep
 // recon, poison-library promotion, interesting-file inventory, Blackout, and
-// host-fortification tool for Grey Hack Public v0.9.6773.
+// host-fortification tool for Grey Hack Public.
 //
 // AutoHack is a clean rebuild informed by the preserved BlueHack donor, the
 // field-proven Auto Family engines, and the preserved Nmap Synthwave Deep Recon
-// 1.0.0 donor. One public IP plus an optional port and/or exact LAN IP drives
+// version-one donor. One public IP plus an optional port and/or exact LAN IP drives
 // the whole access sequence: discover every visible endpoint, reuse or expand
 // ACVDB3, rank exploits, recover root credentials, retain the strongest usable
 // shell, and replace computer/router logs before and after operator-opened
@@ -20,7 +20,9 @@
 // from /root/PoisonLibs through separately obtained root file/computer authority.
 // Confirmation-gated nuke and harden operations remain isolated from ordinary
 // attack and reconnaissance paths.
-SCRIPT_VERSION = "2.5.0"
+SCRIPT_VERSION = "3.0.0"
+// Personal activation PIN. The GitHub-ready source leaves this blank.
+PIN = ""
 AUTOSCRIPTS_ROOT = "/root/autoscripts"
 APP_ROOT = "/root/autoscripts/autohack"
 LOG_ROOT = "/root/autoscripts/autohack/logs"
@@ -67,6 +69,8 @@ COLOR_GREEN = "#63FF9B"
 COLOR_RED = "#FF5C7C"
 COLOR_ORANGE = "#FFB86B"
 COLOR_PINK = "#FF79C6"
+COLOR_LAVENDER = "#C7A7E8"
+COLOR_DIM = "#A79BC8"
 // Known Grey Hack operating-system and service files. AutoHack suppresses only
 // these exact paths; an unfamiliar tool living beside them is still reported.
 // Comparisons are case-insensitive so player-created capitalization cannot make
@@ -95,14 +99,40 @@ INTERESTING_STOCK_PATHS = [
 "/server/encode.src", "/server/decode.bin", "/server/conf/smtpd.conf",
 "/server/conf/userconfig.sys", "/server/conf/sshd.conf",
 "/server/conf/httpd.conf", "/server/conf/ftpd.conf",
-"/public/htdocs/website.html",
-]
+"/public/htdocs/website.html",]
 paint = function(value, color)
 return "<color=" + color + ">" + str(value) + "</color>"
 end function
+action_piece_color = function(piece, label)
+lowered = piece.lower
+label_lower = label.lower
+if lowered.indexOf("failed") != null or lowered.indexOf("mismatch") != null or
+lowered.indexOf("unavailable") != null or lowered.indexOf("exhausted") != null or
+lowered.indexOf("not found") != null then return COLOR_RED
+if lowered == "root" or lowered == "guest" or lowered.indexOf("credential") != null or
+lowered.indexOf("authority") != null then return COLOR_PINK
+if piece.indexOf("@") != null or (piece.indexOf(":") != null and piece.indexOf(" ") == null) then return COLOR_CYAN
+if piece.indexOf("/") == 0 then return COLOR_ORANGE
+if label_lower.indexOf("endpoint") != null or label_lower.indexOf("library") != null or
+label_lower.indexOf("reconnect") != null or lowered.indexOf("endpoint") != null then return COLOR_CYAN
+if lowered.indexOf("retained") != null or lowered.indexOf("installed") != null or
+lowered.indexOf("reacquired") != null or lowered.indexOf("ready") != null or
+lowered.indexOf("accepted") != null then return COLOR_GREEN
+if lowered.indexOf("waiting") != null or lowered.indexOf("skipped") != null or
+lowered.indexOf("attempt") != null or lowered.indexOf("continuing") != null then return COLOR_ORANGE
+return COLOR_DIM
+end function
 show_auto_action = function(label, detail = "", color = COLOR_PURPLE)
 line = paint("◆ " + label, color)
-if detail != "" then line = line + "  " + paint(detail, COLOR_CYAN)
+if detail != "" then
+pieces = detail.split("[|]")
+for piece in pieces
+piece = piece.trim
+if piece == "" then continue
+if line.indexOf("  ") != null then line = line + "  |  " else line = line + "  "
+line = line + paint(piece, action_piece_color(piece, label))
+end for
+end if
 print(line)
 end function
 show_attack_attempt = function(fingerprint, attempt, mode)
@@ -114,25 +144,27 @@ end function
 show_attack_result = function(value, target_match = true)
 kind = typeof(value).lower
 if is_exploit_object(value) then
-level = access_level(value)
 if is_shell(value) and not target_match then
-print(paint("  ╰─ OBJECT REJECTED", COLOR_ORANGE) + "  " +
+print(paint("  ╰ OBJECT REJECTED", COLOR_ORANGE) + "  " +
 paint("shell target mismatch", COLOR_RED))
 return
 end if
-label = "OBJECT RETAINED"
-if is_shell(value) then label = "ACCESS RETAINED"
-print(paint("  ╰─ " + label, COLOR_GREEN) + "  " +
-paint(kind, COLOR_CYAN) + "  " + paint(level, COLOR_PINK))
+authority = access_level(value)
+if is_shell(value) then
+print(paint("  ╰ ACCESS RETAINED", COLOR_GREEN) + "  " + paint(kind, COLOR_CYAN) +
+"  authority=" + paint(authority, COLOR_PINK))
+else
+print(paint("  ╰ OBJECT RETAINED", COLOR_GREEN) + "  " + paint(kind, COLOR_CYAN) +
+"  authority=" + paint(authority, COLOR_PINK))
+end if
 return
 end if
 if kind == "number" then
-print(paint("  ╰─ PAYLOAD ACCEPTED", COLOR_GREEN) + "  " +
+print(paint("  ╰ PAYLOAD ACCEPTED", COLOR_GREEN) + "  " +
 paint("numeric return", COLOR_PINK))
 return
 end if
-print(paint("  ╰─ NO USABLE RESULT", COLOR_RED) + "  " +
-paint(kind, COLOR_PURPLE))
+print(paint("  ╰ NO USABLE RESULT", COLOR_RED) + "  " + paint(kind, COLOR_RED))
 end function
 show_banner = function()
 print("                       " + paint("◆", COLOR_PINK) + "      " +
@@ -149,6 +181,22 @@ print(paint("    │                     │         ╭──────╯", 
 print(paint("    ╰─────────────────────", COLOR_PURPLE) +
 paint("◆", COLOR_CYAN) + paint("─────────╯", COLOR_PURPLE))
 print(paint("      ROWAN CIRCUIT // ", COLOR_PURPLE) + paint(SCRIPT_VERSION, COLOR_CYAN))
+end function
+require_pin = function()
+if PIN == "" then
+show_auto_action("AUTOHACK LOCKED", "configure PIN in the source", COLOR_RED)
+return false
+end if
+origin = globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+print(paint("╭─◆ AUTOHACK ◆─", COLOR_PURPLE) + paint("[PIN REQUIRED]", COLOR_ORANGE))
+entered = user_input(paint("╰─ORIGIN ", COLOR_ORANGE) + paint(origin, COLOR_CYAN) +
+paint(" ─▶ ENTER PIN ─▶ ", COLOR_GREEN), 1)
+if entered != PIN then
+show_auto_action("AUTHORITY DENIED", "invalid PIN", COLOR_RED)
+return false
+end if
+show_auto_action("AUTHORITY", "PIN accepted", COLOR_GREEN)
+return true
 end function
 join_path = function(folder, name)
 if folder == "/" then return "/" + name
@@ -244,27 +292,143 @@ if not is_file(globals.log_folder) then return false
 if not is_file(globals.vuln_folder) then return false
 return true
 end function
+semantic_diag_color = function(key, value, context)
+key_lower = key.lower
+value_lower = value.lower
+context_lower = context.lower
+if value_lower.indexOf("failed") != null or value_lower.indexOf("rejected") != null or
+value_lower.indexOf("refused") != null or value_lower.indexOf("unavailable") != null or
+value_lower.indexOf("invalid") != null or value_lower.indexOf("exhausted") != null or
+value_lower.indexOf("not-found") != null or value_lower.indexOf("not_found") != null then return COLOR_RED
+if key_lower.indexOf("risk") != null then
+if value_lower == "0" or value_lower == "false" or value_lower == "no" then return COLOR_GREEN
+return COLOR_RED
+end if
+if key_lower.indexOf("failed") != null then
+if value_lower == "0" or value_lower == "false" or value_lower == "no" then return COLOR_GREEN
+return COLOR_RED
+end if
+if value_lower == "yes" or value_lower == "true" or value_lower == "success" or
+value_lower == "ready" or value_lower == "complete" or value_lower == "completed" or
+value_lower == "retained" or value_lower == "saved" or value_lower == "staged" or
+value_lower == "clean" then return COLOR_GREEN
+if value_lower == "no" or value_lower == "false" or value_lower == "unknown" or
+value_lower == "skipped" or value_lower == "cancelled" or value_lower == "masked" then return COLOR_ORANGE
+if key_lower.indexOf("authority") != null or key_lower.indexOf("user") != null or
+key_lower.indexOf("credential") != null or key_lower.indexOf("password") != null or
+key_lower.indexOf("session") != null or key_lower.indexOf("index") != null then return COLOR_PINK
+if key_lower.indexOf("host") != null or key_lower.indexOf("endpoint") != null or
+key_lower.indexOf("router") != null or key_lower.indexOf("ip") != null or
+key_lower.indexOf("lan") != null or key_lower.indexOf("port") != null or
+key_lower.indexOf("library") != null or key_lower == "lib" or
+key_lower.indexOf("version") != null or key_lower.indexOf("schema") != null or
+key_lower.indexOf("bucket") != null or key_lower.indexOf("service") != null then return COLOR_CYAN
+if key_lower.indexOf("path") != null or key_lower.indexOf("file") != null or
+key_lower.indexOf("folder") != null or key_lower.indexOf("source") != null then
+if context_lower.indexOf("cleanup") != null or context_lower.indexOf("log ") != null or
+context_lower.indexOf("poison") != null then return COLOR_ORANGE
+return COLOR_PURPLE
+end if
+if key_lower.indexOf("vuln") != null or key_lower.indexOf("region") != null or
+key_lower.indexOf("overflow") != null then return COLOR_PURPLE
+if key_lower.indexOf("mode") != null or key_lower.indexOf("reason") != null or
+key_lower.indexOf("status") != null or key_lower.indexOf("state") != null or
+key_lower.indexOf("requested") != null then return COLOR_ORANGE
+if key_lower.indexOf("count") != null or key_lower.indexOf("entries") != null or
+key_lower.indexOf("attempt") != null or key_lower.indexOf("result") != null or
+key_lower.indexOf("computer") != null or key_lower.indexOf("objects") != null or
+key_lower.indexOf("deleted") != null or key_lower.indexOf("preserved") != null or
+key_lower.indexOf("retained") != null then return COLOR_PINK
+return COLOR_DIM
+end function
+semantic_diag_field = function(field, context)
+cleaned = field.trim
+if cleaned == "" then return ""
+equals = cleaned.indexOf("=")
+if equals == null then return paint(cleaned, semantic_diag_color("", cleaned, context))
+key = cleaned[:equals].trim
+value = cleaned[equals + 1:].trim
+return key.replace("_", " ") + "=" + paint(value, semantic_diag_color(key, value, context))
+end function
+semantic_diag_lead = function(lead)
+cleaned = lead.trim
+lowered = cleaned.lower
+if cleaned == "" then return ""
+if lowered.indexOf("failed") != null or lowered.indexOf("refused") != null or
+lowered.indexOf("rejected") != null or lowered.indexOf("unavailable") != null or
+lowered.indexOf("exhausted") != null then return paint(cleaned, COLOR_RED)
+if lowered.indexOf("complete") != null or lowered.indexOf("ready") != null or
+lowered.indexOf("retained") != null or lowered.indexOf("recovered") != null or
+lowered.indexOf("installed") != null then return paint(cleaned, COLOR_GREEN)
+if lowered.indexOf("cleanup") != null or lowered.indexOf("clean") != null or
+lowered.indexOf("promotion") != null or lowered.indexOf("staged") != null or
+lowered.indexOf("skipped") != null or lowered.indexOf("nuke") != null or
+lowered.indexOf("harden") != null then return paint(cleaned, COLOR_ORANGE)
+if lowered.indexOf("credential") != null or lowered.indexOf("password") != null then return paint(cleaned, COLOR_PINK)
+if lowered.indexOf("vuln") != null or lowered.indexOf("scan") != null then return paint(cleaned, COLOR_PURPLE)
+return paint(cleaned, COLOR_DIM)
+end function
 terminal_diag = function(message, line)
 lowered = message.lower
-if lowered.indexOf("fail") != null or lowered.indexOf("reject") != null or
-lowered.indexOf("risk") != null or lowered.indexOf("unavailable") != null then
-return paint(line, COLOR_RED)
+label = "EVENT"
+label_color = COLOR_PURPLE
+if lowered.indexOf("cleanup") != null or lowered.indexOf("logs clean") != null or
+lowered.indexOf("finalizer") != null then
+label = "CLEANUP"
+label_color = COLOR_ORANGE
+else if lowered.indexOf("vuln") != null or lowered.indexOf("scan") != null then
+label = "VULNERABILITY"
+else if lowered.indexOf("credential") != null then
+label = "AUTHORITY"
+label_color = COLOR_PINK
+else if lowered.indexOf("poison") != null then
+label = "POISONLIB"
+else if lowered.indexOf("nuke") != null then
+label = "BLACKOUT"
+label_color = COLOR_RED
+else if lowered.indexOf("harden") != null then
+label = "FORTIFICATION"
+label_color = COLOR_ORANGE
+else if lowered.indexOf("target") != null then
+label = "TARGET"
+else if lowered.indexOf("access ready") != null then
+label = "ACCESS RETAINED"
+label_color = COLOR_GREEN
+else if lowered.indexOf("startup") != null then
+label = "STARTUP"
+else if lowered.indexOf("shutdown") != null then
+label = "SHUTDOWN"
+label_color = COLOR_ORANGE
 end if
-if lowered.indexOf("clean") != null or lowered.indexOf("log ") != null or
-lowered.indexOf("reboot") != null or lowered.indexOf("promotion") != null then
-return paint(line, COLOR_ORANGE)
+if lowered.indexOf("failed") != null or lowered.indexOf("refused") != null or
+lowered.indexOf("unavailable") != null then label_color = COLOR_RED
+if label == "EVENT" and (lowered.indexOf("complete") != null or
+lowered.indexOf("ready") != null or lowered.indexOf("recovered") != null) then
+label = "READY"
+label_color = COLOR_GREEN
 end if
-if lowered.indexOf("credential recovered") != null or
-lowered.indexOf("access retained") != null or
-lowered.indexOf("root reconnect") != null or
-lowered.indexOf("escalated") != null then return paint(line, COLOR_GREEN)
-if lowered.indexOf("vuln") != null or lowered.indexOf("scan") != null or
-lowered.indexOf("overflow") != null then return paint(line, COLOR_PURPLE)
-if lowered.indexOf("verified") != null or lowered.indexOf("admitted") != null or
-lowered.indexOf("success") != null then return paint(line, COLOR_GREEN)
-if lowered.indexOf("host") != null or lowered.indexOf("ssh") != null or
-lowered.indexOf("candidate") != null then return paint(line, COLOR_CYAN)
-return line
+parts = message.split("[|]")
+lead = parts[0].trim
+output = paint("◆ " + label, label_color) + "  " + paint("[AHLOG " + globals.log_seq + "]", COLOR_DIM)
+lead_output = semantic_diag_lead(lead)
+if lead_output != "" then output = output + "  " + lead_output
+branch = ""
+fields_on_branch = 0
+if parts.len > 1 then
+for index in range(1, parts.len - 1)
+field_output = semantic_diag_field(parts[index], lead)
+if field_output == "" then continue
+if fields_on_branch == 0 then branch = paint("  ╰ ", COLOR_DIM) + field_output else branch = branch + "  |  " + field_output
+fields_on_branch = fields_on_branch + 1
+if fields_on_branch == 2 then
+output = output + char(10) + branch
+branch = ""
+fields_on_branch = 0
+end if
+end for
+end if
+if fields_on_branch > 0 then output = output + char(10) + branch
+return output
 end function
 init_log = function()
 globals.log_seq = 0
@@ -475,8 +639,7 @@ return {
 "trash_skipped": trash_skipped,
 "unreadable": unreadable,
 "truncated": truncated,
-"symlink_api": symlink_api,
-}
+"symlink_api": symlink_api,}
 end function
 print_interesting_inventory = function(scan, access, session_index)
 print(char(10) + paint("INTERESTING FILES", COLOR_PURPLE) + " [" +
@@ -624,10 +787,7 @@ for unsafe in unsafe_checks(provider, meta_lib, region)
 // argument, so these two calls cover every runtime result family
 // without the former duplicate no-argument attempt.
 bridge.an_router_attempts = bridge.an_router_attempts + 1
-show_attack_attempt(
-vuln_fingerprint(meta_lib),
-bridge.an_router_attempts,
-"router LAN payload")
+show_attack_attempt(vuln_fingerprint(meta_lib), bridge.an_router_attempts, "router LAN payload")
 result = meta_lib.overflow(region, unsafe, router.local_ip)
 show_attack_result(result)
 if is_exploit_object(result) then
@@ -639,10 +799,7 @@ bridge.an_router_detail = "cleanup-source-ready"
 return source
 end if
 bridge.an_router_attempts = bridge.an_router_attempts + 1
-show_attack_attempt(
-vuln_fingerprint(meta_lib),
-bridge.an_router_attempts,
-"router credential payload")
+show_attack_attempt(vuln_fingerprint(meta_lib), bridge.an_router_attempts, "router credential payload")
 result = meta_lib.overflow(region, unsafe, ROOT_PASSWORD_INJECT)
 show_attack_result(result)
 if is_exploit_object(result) then
@@ -1394,9 +1551,7 @@ return outcome
 end if
 remove_remote_promotion_stage(attack_result.shell, stage)
 show_auto_action("POISON INSTALLED", "/lib/" + library_name + " + /bin/reboot", COLOR_GREEN)
-diag("poison installed | host=" + endpoint.ip + ":" + endpoint.port +
-" | lan=" + endpoint.lan + " | library=/lib/" + library_name +
-" | reboot=/bin/reboot")
+diag("poison installed | host=" + endpoint.ip + ":" + endpoint.port + " | lan=" + endpoint.lan + " | library=/lib/" + library_name + " | reboot=/bin/reboot")
 // The Computer API is the authority-bearing reboot path used by 5hell.
 // /bin/reboot is installed first because current routers may not expose a
 // commandable reboot until the binary exists on the target filesystem.
@@ -1424,9 +1579,7 @@ else
 globals.poison_last = library_name + " | reacquisition failed"
 outcome.status = "reacquisition failed"
 show_auto_action("POISON REACQUIRE FAILED", "endpoint remains changed", COLOR_RED)
-diag("poison promotion failed | host=" + endpoint.ip + ":" + endpoint.port +
-" | lan=" + endpoint.lan + " | library=" + library_name +
-" | reason=reacquisition-failed | residual_risk=yes")
+diag("poison promotion failed | host=" + endpoint.ip + ":" + endpoint.port + " | lan=" + endpoint.lan + " | library=" + library_name + " | reason=reacquisition-failed | residual_risk=yes")
 end if
 return outcome
 end function
@@ -1772,8 +1925,7 @@ end if
 if not is_shell(best_shell) then
 globals.retained_results = []
 save_vulns
-diag("target failed | host=" + ip + " | residual_risk_endpoints=" + risky_endpoints +
-" | reason=no usable shell")
+diag("target failed | host=" + ip + " | residual_risk_endpoints=" + risky_endpoints + " | reason=no usable shell")
 flush_log
 wait(FINALIZER_WAIT_SECONDS)
 clean_execution_route
@@ -1785,8 +1937,7 @@ if expected_lan != "" and target_computer.local_ip != expected_lan then
 globals.retained_results = []
 best_shell = null
 save_vulns
-diag("target refused | host=" + ip + " | requested_lan=" + expected_lan +
-" | reason=returned shell belongs to another LAN machine")
+diag("target refused | host=" + ip + " | requested_lan=" + expected_lan + " | reason=returned shell belongs to another LAN machine")
 flush_log
 wait(FINALIZER_WAIT_SECONDS)
 clean_execution_route
@@ -2410,8 +2561,7 @@ print(paint("The destroyed target session was released. /var may regenerate duri
 if total_failed == 0 then
 print(paint("BLACKOUT PAYLOAD COMPLETE", COLOR_GREEN))
 else
-print(paint("BLACKOUT PAYLOAD PARTIAL", COLOR_ORANGE) +
-" | residual items are listed above")
+print(paint("BLACKOUT PAYLOAD PARTIAL", COLOR_ORANGE) + " | residual items are listed above")
 end if
 return true
 end function
@@ -2467,20 +2617,16 @@ globals.harden_last = mode + " | staging"
 diag("harden start | mode=" + mode + " | host=" + host)
 if not prepare_execution_cleanup then
 globals.harden_last = mode + " | cleanup staging failed"
-print(paint("HARDEN REFUSED", COLOR_RED) +
-" | owned execution-route cleanup could not be staged")
-diag("harden refused | mode=" + mode + " | host=" + host +
-" | reason=execution cleanup unavailable")
+print(paint("HARDEN REFUSED", COLOR_RED) + " | owned execution-route cleanup could not be staged")
+diag("harden refused | mode=" + mode + " | host=" + host + " | reason=execution cleanup unavailable")
 flush_log
 return false
 end if
 pre_execution = clean_execution_route
 if not pre_execution then
 globals.harden_last = mode + " | preclean failed"
-print(paint("HARDEN REFUSED", COLOR_RED) +
-" | owned execution route could not be cleaned")
-diag("harden refused | mode=" + mode + " | host=" + host +
-" | reason=execution preclean failed")
+print(paint("HARDEN REFUSED", COLOR_RED) + " | owned execution route could not be cleaned")
+diag("harden refused | mode=" + mode + " | host=" + host + " | reason=execution preclean failed")
 flush_log
 return false
 end if
@@ -2975,8 +3121,7 @@ deep_add_gap(router_id, deep_safe_string(router.local_ip), "direct /24 ping disc
 return addresses
 end if
 if not deep_same_router(router, globals.deep_vantage_router) then
-deep_add_gap(router_id, deep_safe_string(router.local_ip),
-"direct /24 ping discovery requires execution inside this router's LAN")
+deep_add_gap(router_id, deep_safe_string(router.local_ip), "direct /24 ping discovery requires execution inside this router's LAN")
 return addresses
 end if
 local_ip = deep_safe_string(router.local_ip, "")
@@ -3109,8 +3254,7 @@ end if
 addresses = deep_expand_direct_subnet(router, router_id, addresses)
 addresses.sort
 if not router_is_vantage then
-deep_add_gap(router_id, local_ip,
-"execution-host ping and local switch-object lookup withheld outside this LAN to avoid private-IP collisions")
+deep_add_gap(router_id, local_ip, "execution-host ping and local switch-object lookup withheld outside this LAN to avoid private-IP collisions")
 end if
 for ip in addresses
 if globals.deep_stats.lan_nodes >= DEEP_MAX_NETWORK_DEVICES then
@@ -3209,8 +3353,7 @@ else
 deep_add_gap(router_id, ip, "child " + child_info.kind + " found at recursion depth limit")
 end if
 else if node_kind != "host" and not router_is_vantage then
-deep_add_gap(router_id, ip,
-"child-object lookup withheld outside execution LAN to avoid private-IP collision")
+deep_add_gap(router_id, ip, "child-object lookup withheld outside execution LAN to avoid private-IP collision")
 end if
 end for
 end function
@@ -3323,11 +3466,9 @@ same_public = deep_safe_string(globals.deep_execution_computer.public_ip, "") ==
 globals.deep_coverage = "EXTERNAL-VIEW"
 if globals.deep_target_is_lan or same_public then globals.deep_coverage = "LAN-VISIBLE"
 if globals.deep_coverage == "EXTERNAL-VIEW" then
-deep_add_gap("ROOT", globals.deep_root_router.public_ip,
-"external view cannot prove devices hidden behind nested firewalls; re-run from an internal foothold")
+deep_add_gap("ROOT", globals.deep_root_router.public_ip, "external view cannot prove devices hidden behind nested firewalls; re-run from an internal foothold")
 end if
-deep_add_gap("API", globals.deep_target_ip,
-"game-hidden LAN identities suppress passive device listing and ping; absence requires a known IP or another vantage")
+deep_add_gap("API", globals.deep_target_ip, "game-hidden LAN identities suppress passive device listing and ping; absence requires a known IP or another vantage")
 deep_heading("DEEP TOPOLOGY COLLECTION")
 print(paint("Enumerating forwarded ports, router-local control planes, LAN nodes, " +
 "internal services, local switches, pivot gaps, and firewall barriers...", COLOR_PURPLE))
@@ -3711,9 +3852,10 @@ globals.harden_attempts = 0
 globals.harden_successes = 0
 globals.harden_last = "none"
 show_banner
-if typeof(globals.metaxploit).lower != "metaxploitlib" then exit("Missing /lib/metaxploit.so.")
-if typeof(globals.crypto).lower != "cryptolib" then exit("Missing /lib/crypto.so.")
-if not init_storage then exit("AutoHack could not create /root/autoscripts/autohack.")
+if not require_pin then exit
+if typeof(globals.metaxploit).lower != "metaxploitlib" then exit(paint("AUTOHACK ERROR", COLOR_RED) + " missing " + paint("/lib/metaxploit.so", COLOR_CYAN))
+if typeof(globals.crypto).lower != "cryptolib" then exit(paint("AUTOHACK ERROR", COLOR_RED) + " missing " + paint("/lib/crypto.so", COLOR_CYAN))
+if not init_storage then exit(paint("AUTOHACK ERROR", COLOR_RED) + " could not create " + paint(APP_ROOT, COLOR_ORANGE))
 init_log
 init_vulns
 diag("startup | host=" + globals.local_computer.public_ip + "/" +

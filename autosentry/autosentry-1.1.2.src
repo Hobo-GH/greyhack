@@ -1,6 +1,6 @@
 //Made By Hobo & Rowan
-// AutoSentry 1.0.0
-// Grey Hack / GreyScript persistent filesystem baseline and live monitor.
+// AutoSentry 1.1.2 for Grey Hack Public v0.9.6773.
+// Persistent filesystem baseline and live process monitor with the Auto Family interface.
 //
 // Usage:
 //   autosentry [refresh_seconds]
@@ -14,49 +14,41 @@
 // binary contents, so same-path binary content changes are visible only when
 // exposed metadata also changes. Process state remains live and memory-only.
 
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.2"
+
+// Personal activation PIN. The GitHub-ready source leaves this blank.
+PIN = ""
+
 STATE_ROOT = "/root/autoscripts/sentry"
 LEGACY_STATE_ROOT = "/root/sentry"
 STATE_INDEX = STATE_ROOT + "/index.txt"
 STATE_BANK_A = STATE_ROOT + "/baseline-a"
 STATE_BANK_B = STATE_ROOT + "/baseline-b"
+LOG_ROOT = STATE_ROOT + "/logs"
+LOG_PATH = LOG_ROOT + "/latest.txt"
 STATE_INDEX_HEADER = "SENTRYINDEX1"
 STATE_SHARD_HEADER = "SENTRYSHARD1"
 STATE_SHARD_PREFIX = "shard-"
 STATE_SHARD_LIMIT = 120000
 
-usage = "AutoSentry " + SCRIPT_VERSION + char(10) +
-    "Usage:" + char(10) +
-    "  autosentry                     compare the saved baseline, then watch live" + char(10) +
-    "  autosentry <seconds>           watch with a custom delay (minimum 0.1)" + char(10) +
-    "  autosentry check               compare once and exit" + char(10) +
-    "  autosentry accept              review and explicitly trust current state" + char(10) +
-    "  autosentry help | -h | --help  show this help" + char(10) + char(10) +
-    "The first run creates /root/autoscripts/sentry automatically. Later changes" + char(10) +
-    "are never" + char(10) +
-    "silently accepted. Hidden dot-paths such as /root/.Trash are monitored."
-
-shell = get_shell
-if shell == null then exit("autosentry: no active shell")
-
-computer = shell.host_computer
-if computer == null then exit("autosentry: no host computer")
+COLOR_PURPLE = "#D86CFF"
+COLOR_CYAN = "#55E7FF"
+COLOR_GREEN = "#63FF9B"
+COLOR_RED = "#FF5C7C"
+COLOR_ORANGE = "#FFB86B"
+COLOR_PINK = "#FF79C6"
+COLOR_LAVENDER = "#C7A7E8"
+COLOR_DIM = "#A79BC8"
 
 paint = function(text, color)
-    return "<color=#" + color + ">" + str(text) + "</color>"
+    return "<color=" + color + ">" + str(text) + "</color>"
 end function
 
-C = {
-    "title": "D86CFF",
-    "cyan": "55E7FF",
-    "dim": "A79BC8",
-    "add": "63FF9B",
-    "delete": "FF5C7C",
-    "modify": "FFB86B",
-    "process": "FF79C6",
-    "issue": "FFB86B",
-    "good": "63FF9B",
-}
+shell = get_shell
+if shell == null then exit(paint("AUTOSENTRY ERROR", COLOR_RED) + " no active shell")
+
+computer = shell.host_computer
+if computer == null then exit(paint("AUTOSENTRY ERROR", COLOR_RED) + " no host computer")
 
 // Reject partial numeric strings instead of silently accepting their prefix.
 validIntervalText = function(raw)
@@ -83,24 +75,134 @@ refresh = 1
 mode = "watch"
 args = params
 if args == null then args = []
-if args.len > 1 then exit("autosentry: too many arguments" + char(10) + usage)
+if args.len > 1 then exit(paint("AUTOSENTRY ERROR", COLOR_RED) + " too many arguments; use autosentry help")
 
 if args.len == 1 then
     arg = args[0].trim.lower
-    if arg == "help" or arg == "-h" or arg == "--help" then exit(usage)
-    if arg == "check" or arg == "accept" then
+    if arg == "help" or arg == "-h" or arg == "--help" then
+        mode = "help"
+    else if arg == "check" or arg == "accept" then
         mode = arg
     else
         if not validIntervalText(arg) then
-            exit("autosentry: expected check, accept, help, or a refresh number" + char(10) + usage)
+            exit(paint("AUTOSENTRY ERROR", COLOR_RED) + " expected check, accept, help, or a refresh number")
         end if
 
         refresh = arg.val
         if refresh < 0.1 then
-            exit("autosentry: refresh must be at least 0.1 seconds" + char(10) + usage)
+            exit(paint("AUTOSENTRY ERROR", COLOR_RED) + " refresh must be at least 0.1 seconds")
         end if
     end if
 end if
+
+showEvent = function(label, detail = "", labelColor = "", detailColor = "", sequence = 0)
+    if labelColor == "" then labelColor = COLOR_PURPLE
+    if detailColor == "" then detailColor = COLOR_DIM
+    line = paint("◆ " + label, labelColor)
+    if sequence > 0 then line = line + " " + paint("[ASLOG " + sequence + "]", COLOR_DIM)
+    if detail != "" then line = line + "  " + paint(detail, detailColor)
+    print(line)
+end function
+
+showBranch = function(labelA, valueA, colorA, labelB = "", valueB = "", colorB = "")
+    if colorB == "" then colorB = COLOR_DIM
+    line = paint("  ╰ " + labelA + "=", COLOR_DIM) + paint(valueA, colorA)
+    if labelB != "" then
+        line = line + paint("  |  " + labelB + "=", COLOR_DIM) + paint(valueB, colorB)
+    end if
+    print(line)
+end function
+
+originIdentity = function()
+    return computer.public_ip + "/" + computer.local_ip
+end function
+
+modeColor = function()
+    if mode == "accept" then return COLOR_ORANGE
+    if mode == "check" then return COLOR_CYAN
+    if mode == "watch" then return COLOR_GREEN
+    return COLOR_PURPLE
+end function
+
+showCircuit = function()
+    print("")
+    print("                    " + paint("◆ BASELINE A", COLOR_PINK))
+    print("                    " + paint("│", COLOR_PURPLE))
+    print(paint("◆ FILESYSTEM ───────┼──────╮", COLOR_CYAN))
+    print("                    " + paint("│", COLOR_PURPLE) + "      " + paint("│", COLOR_CYAN))
+    print("        " + paint("◆ PROCESS ──╯", COLOR_PINK) + "   " + paint("╭──┴───────────╮", COLOR_PURPLE))
+    print("                        " + paint("│  ", COLOR_PURPLE) + paint("AUTOSENTRY", COLOR_PINK) +
+        paint("  ├────◆ LIVE", COLOR_GREEN))
+    print("              " + paint("◆ BANK B ─╯──────┬───────╯", COLOR_CYAN))
+    print("                               " + paint("│", COLOR_ORANGE))
+    print("                          " + paint("WATCH", COLOR_GREEN) + "  " + paint("ACCEPT", COLOR_ORANGE))
+    print(paint("ROWAN CIRCUIT // ", COLOR_PURPLE) + paint(SCRIPT_VERSION, COLOR_CYAN))
+end function
+
+showHelp = function()
+    print("")
+    print(paint("AutoSentry ", COLOR_PURPLE) + paint(SCRIPT_VERSION, COLOR_CYAN) +
+        paint(" — persistent system change watch", COLOR_DIM))
+    print(paint("AutoSentry compares the entire visible filesystem against a trusted baseline", COLOR_GREEN))
+    print(paint("and watches filesystem, process, and scan-health changes without silently trusting them.", COLOR_DIM))
+    print("")
+    print(paint("Commands", COLOR_PURPLE))
+    print("  " + paint("watch / <seconds>", COLOR_GREEN) + "  compare, offer Y/N for changes, then watch continuously")
+    print("  " + paint("check", COLOR_CYAN) + "              compare once and preserve the trusted baseline")
+    print("  " + paint("accept", COLOR_ORANGE) + "             review changes and explicitly promote current state")
+    print("  " + paint("help", COLOR_CYAN) + "               show this guide")
+    print("")
+    print(paint("Trust controls", COLOR_PURPLE))
+    print("  " + paint("ACCEPT", COLOR_ORANGE) + "   required before known-safe changes replace a valid baseline")
+    print("  " + paint("REBUILD", COLOR_RED) + "  required before an invalid baseline is deliberately replaced")
+    print("  " + paint("preserved", COLOR_GREEN) + " existing trust is never overwritten by watch or check mode")
+    print("")
+    print(paint("Coverage", COLOR_PURPLE))
+    print("  " + paint("hidden dot-paths", COLOR_PINK) + " are included and labeled HIDDEN")
+    print("  " + paint("text files", COLOR_CYAN) + " are hashed; binary content needs exposed metadata change")
+    print("  " + paint("polling", COLOR_ORANGE) + " can miss a change made and reversed between completed scans")
+end function
+
+showSignature = function(state)
+    print(paint("╭─◆ AUTOSENTRY ◆─", COLOR_PURPLE) + paint("[" + state + "]", modeColor))
+    print(paint("╰─ORIGIN ", COLOR_ORANGE) + paint(originIdentity, COLOR_CYAN) +
+        paint(" ─▶ MODE ", COLOR_GREEN) + paint(mode.upper, modeColor) + paint(" ─▶ ", COLOR_GREEN))
+end function
+
+requestConfirmation = function(state, keyword, stateColor)
+    print("")
+    print(paint("╭─◆ AUTOSENTRY ◆─", COLOR_PURPLE) + paint("[" + state + "]", stateColor))
+    return user_input(paint("╰─ORIGIN ", COLOR_ORANGE) + paint(originIdentity, COLOR_CYAN) +
+        paint(" ─▶ TYPE ", COLOR_GREEN) + paint(keyword, stateColor) + paint(" ─▶ ", COLOR_GREEN)).trim.upper
+end function
+
+requestAcceptDecision = function()
+    while true
+        print("")
+        print(paint("╭─◆ AUTOSENTRY ◆─", COLOR_PURPLE) + paint("[CHANGES DETECTED]", COLOR_ORANGE))
+        answer = user_input(paint("╰─ORIGIN ", COLOR_ORANGE) + paint(originIdentity, COLOR_CYAN) +
+            paint(" ─▶ ACCEPT THESE CHANGES? ", COLOR_GREEN) + paint("[Y/N]", COLOR_PINK) +
+            paint(" ─▶ ", COLOR_GREEN)).trim.upper
+        if answer == "Y" or answer == "YES" then return true
+        if answer == "N" or answer == "NO" then return false
+        showEvent("INPUT REQUIRED", "type Y or N", COLOR_ORANGE, COLOR_ORANGE)
+    end while
+end function
+
+requirePin = function()
+    if PIN == "" then
+        showEvent("AUTOSENTRY LOCKED", "configure PIN in the source", COLOR_RED, COLOR_ORANGE)
+        return false
+    end if
+    print(paint("╭─◆ AUTOSENTRY ◆─", COLOR_PURPLE) + paint("[PIN REQUIRED]", COLOR_ORANGE))
+    entered = user_input(paint("╰─ORIGIN ", COLOR_ORANGE) + paint(originIdentity, COLOR_CYAN) +
+        paint(" ─▶ ENTER PIN ─▶ ", COLOR_GREEN), 1)
+    if entered != PIN then
+        showEvent("AUTHORITY DENIED", "invalid PIN", COLOR_RED, COLOR_RED)
+        return false
+    end if
+    return true
+end function
 
 shown = function(value)
     if value == null or value == "~" then return "<unavailable>"
@@ -130,6 +232,7 @@ isManagedStatePath = function(path)
     if path == STATE_INDEX then return true
     if path.indexOf(STATE_BANK_A + "/" + STATE_SHARD_PREFIX) == 0 then return true
     if path.indexOf(STATE_BANK_B + "/" + STATE_SHARD_PREFIX) == 0 then return true
+    if path == LOG_ROOT or path == LOG_PATH then return true
     return false
 end function
 
@@ -138,8 +241,8 @@ addIssue = function(issues, message)
 end function
 
 // A snapshot retains metadata and hashes, never File objects or file content.
-// Dot-prefixed names are not filtered. Only AutoSentry's own index and bank shards
-// are omitted so saving state cannot create false intrusion alerts.
+// Dot-prefixed names are not filtered. Only AutoSentry's own index, bank shards,
+// and exact diagnostic log are omitted so saving state cannot create false alerts.
 scanFilesystem = function
     entries = {}
     issues = {}
@@ -261,8 +364,7 @@ scanFilesystem = function
                 "binary": stateValue(isBinary),
                 "target": stateValue(linkTarget),
                 "digest": stateValue(digest),
-                "content_state": stateValue(contentState),
-            }
+                "content_state": stateValue(contentState),}
         end if
 
         // A link is an item to monitor, never an edge to follow.
@@ -344,6 +446,29 @@ ensureTextFile = function(folder, name)
     file = computer.File(joinPath(folder.path, name))
     if isFileObject(file) and not file.is_folder then return file
     return null
+end function
+
+initDiagnostics = function(storage)
+    if storage == null then return false
+    logFolder = ensureFolder(storage["root"].path, "logs")
+    if not isFileObject(logFolder) then return false
+    file = ensureTextFile(logFolder, "latest.txt")
+    if not isFileObject(file) then return false
+    return file.set_content("") == 1
+end function
+
+recordDiag = function(label, detail = "")
+    globals.log_sequence = globals.log_sequence + 1
+    plain = "[ASLOG " + globals.log_sequence + "] " + label
+    if detail != "" then plain = plain + " | " + detail
+    file = computer.File(LOG_PATH)
+    if not isFileObject(file) then return globals.log_sequence
+    existing = file.get_content
+    if typeof(existing).lower != "string" then existing = ""
+    if existing.len > 120000 then existing = "[ASLOG ROLLOVER] previous live diagnostic window retired"
+    if existing != "" then existing = existing + char(10)
+    file.set_content(existing + plain)
+    return globals.log_sequence
 end function
 
 legacyHasUnexpectedItems = function(legacy)
@@ -571,9 +696,7 @@ parseEntry = function(line)
             "binary": decodeField(fields[8]),
             "target": decodeField(fields[9]),
             "digest": decodeField(fields[10]),
-            "content_state": decodeField(fields[11]),
-        },
-    }
+            "content_state": decodeField(fields[11]),},}
 end function
 
 loadStateIndex = function
@@ -607,8 +730,7 @@ loadStateIndex = function
         "shards": values["shards"].val,
         "entries": values["entries"].val,
         "checksum": values["checksum"],
-        "saved": values["saved"],
-    }
+        "saved": values["saved"],}
 end function
 
 bankPath = function(bank)
@@ -771,8 +893,7 @@ scanProcesses = function
             "user": fields[0],
             "name": fields[4:].join(" "),
             "cpu": fields[2],
-            "mem": fields[3],
-        }
+            "mem": fields[3],}
     end for
 
     if malformed > 0 then
@@ -837,12 +958,20 @@ emitFilesystemChanges = function(previous, current, stamp)
         newEntry = current[path]
         if not previous.hasIndex(path) then
             added = added + 1
-            print(stamp + " " + paint("FS ADD", C.add) + " [" + kindName(newEntry) + "] " + path)
+            sequence = recordDiag("filesystem add", "time=" + stamp + " | type=" + kindName(newEntry) + " | path=" + path)
+            showEvent("FILESYSTEM", "item added", COLOR_PURPLE, COLOR_ORANGE, sequence)
+            showBranch("time", stamp, COLOR_DIM, "action", "add", COLOR_ORANGE)
+            showBranch("type", kindName(newEntry), COLOR_CYAN, "path", path, COLOR_ORANGE)
         else
             fields = changedFields(previous[path], newEntry)
             if fields.len > 0 then
                 modified = modified + 1
-                print(stamp + " " + paint("FS CHANGE", C.modify) + " [" + kindName(newEntry) + "] " + path + " | " + fields.join(", "))
+                detail = fields.join(", ")
+                sequence = recordDiag("filesystem change", "time=" + stamp + " | type=" + kindName(newEntry) + " | path=" + path + " | changes=" + detail)
+                showEvent("FILESYSTEM", "item changed", COLOR_PURPLE, COLOR_ORANGE, sequence)
+                showBranch("time", stamp, COLOR_DIM, "action", "modify", COLOR_ORANGE)
+                showBranch("type", kindName(newEntry), COLOR_CYAN, "path", path, COLOR_ORANGE)
+                showBranch("changes", detail, COLOR_ORANGE)
             end if
         end if
     end for
@@ -852,7 +981,10 @@ emitFilesystemChanges = function(previous, current, stamp)
     for path in previousPaths
         if not current.hasIndex(path) then
             deleted = deleted + 1
-            print(stamp + " " + paint("FS DELETE", C.delete) + " [" + kindName(previous[path]) + "] " + path)
+            sequence = recordDiag("filesystem delete", "time=" + stamp + " | type=" + kindName(previous[path]) + " | path=" + path)
+            showEvent("FILESYSTEM", "item deleted", COLOR_PURPLE, COLOR_RED, sequence)
+            showBranch("time", stamp, COLOR_DIM, "action", "delete", COLOR_RED)
+            showBranch("type", kindName(previous[path]), COLOR_CYAN, "path", path, COLOR_ORANGE)
         end if
     end for
 
@@ -870,10 +1002,18 @@ emitProcessChanges = function(previous, current, stamp)
         proc = current[pidText]
         if not previous.hasIndex(pidText) then
             started = started + 1
-            print(stamp + " " + paint("PROCESS START", C.process) + " " + describeProcess(proc))
+            sequence = recordDiag("process start", "time=" + stamp + " | pid=" + proc["pid"] + " | user=" + proc["user"] + " | command=" + proc["name"])
+            showEvent("PROCESS", "started", COLOR_PURPLE, COLOR_ORANGE, sequence)
+            showBranch("time", stamp, COLOR_DIM, "pid", proc["pid"], COLOR_CYAN)
+            showBranch("user", proc["user"], COLOR_PINK, "command", proc["name"], COLOR_CYAN)
         else if not sameProcessIdentity(previous[pidText], proc) then
             reused = reused + 1
-            print(stamp + " " + paint("PID REUSED", C.modify) + " " + describeProcess(previous[pidText]) + " -> " + describeProcess(proc))
+            oldProc = previous[pidText]
+            sequence = recordDiag("pid reused", "time=" + stamp + " | pid=" + pidText + " | before=" + oldProc["user"] + ":" + oldProc["name"] + " | after=" + proc["user"] + ":" + proc["name"])
+            showEvent("PROCESS", "PID identity reused", COLOR_PURPLE, COLOR_RED, sequence)
+            showBranch("time", stamp, COLOR_DIM, "pid", pidText, COLOR_CYAN)
+            showBranch("before-user", oldProc["user"], COLOR_PINK, "before-command", oldProc["name"], COLOR_CYAN)
+            showBranch("after-user", proc["user"], COLOR_PINK, "after-command", proc["name"], COLOR_CYAN)
         end if
     end for
 
@@ -882,7 +1022,11 @@ emitProcessChanges = function(previous, current, stamp)
     for pidText in previousPids
         if not current.hasIndex(pidText) then
             stopped = stopped + 1
-            print(stamp + " " + paint("PROCESS STOP", C.delete) + " " + describeProcess(previous[pidText]))
+            proc = previous[pidText]
+            sequence = recordDiag("process stop", "time=" + stamp + " | pid=" + proc["pid"] + " | user=" + proc["user"] + " | command=" + proc["name"])
+            showEvent("PROCESS", "stopped", COLOR_PURPLE, COLOR_RED, sequence)
+            showBranch("time", stamp, COLOR_DIM, "pid", proc["pid"], COLOR_CYAN)
+            showBranch("user", proc["user"], COLOR_PINK, "command", proc["name"], COLOR_CYAN)
         end if
     end for
 
@@ -898,7 +1042,10 @@ emitIssueChanges = function(previous, current, stamp)
     for issue in currentIssues
         if not previous.hasIndex(issue) then
             opened = opened + 1
-            print(stamp + " " + paint("SCAN ISSUE", C.issue) + " " + issue)
+            sequence = recordDiag("scan issue", "time=" + stamp + " | state=open | detail=" + issue)
+            showEvent("SCAN HEALTH", "issue detected", COLOR_PURPLE, COLOR_ORANGE, sequence)
+            showBranch("time", stamp, COLOR_DIM, "state", "open", COLOR_ORANGE)
+            showBranch("detail", issue, COLOR_ORANGE)
         end if
     end for
 
@@ -907,7 +1054,10 @@ emitIssueChanges = function(previous, current, stamp)
     for issue in previousIssues
         if not current.hasIndex(issue) then
             resolved = resolved + 1
-            print(stamp + " " + paint("ISSUE RESOLVED", C.good) + " " + issue)
+            sequence = recordDiag("scan issue resolved", "time=" + stamp + " | state=resolved | detail=" + issue)
+            showEvent("SCAN HEALTH", "issue resolved", COLOR_PURPLE, COLOR_GREEN, sequence)
+            showBranch("time", stamp, COLOR_DIM, "state", "resolved", COLOR_GREEN)
+            showBranch("detail", issue, COLOR_ORANGE)
         end if
     end for
 
@@ -929,37 +1079,62 @@ filesystemTotal = function(scan)
     return scan["entries"].indexes.len
 end function
 
-print(paint("AUTOSENTRY // PERSISTENT SYSTEM WATCH", C.title))
-print("Version: " + SCRIPT_VERSION + " | Host: " + paint(shown(computer.get_name), C.cyan) + " | User: " + active_user)
-print(paint("Trusted baseline: " + STATE_ROOT + " | mode=" + mode, C.dim))
-print(paint("Hidden dot-paths are included and labeled HIDDEN.", C.title))
-print(paint("Polling caveat: changes made and reversed between completed live scans can be missed.", C.dim))
-print(paint("Text is hashed; same-path binary content needs an exposed metadata change to be visible.", C.dim))
-print("")
-
+globals.log_sequence = 0
+showCircuit
+if not requirePin then exit
+showHelp
+if mode == "help" then exit
 storage = initStateStorage
 if storage == null then
-    exit(paint("AUTOSENTRY ERROR", C.delete) + " could not create or access " + STATE_ROOT + "; run as root and check path permissions")
+    showEvent("AUTOSENTRY ERROR", "state storage unavailable", COLOR_RED, COLOR_RED)
+    showBranch("path", STATE_ROOT, COLOR_ORANGE, "authority", active_user, COLOR_PINK)
+    showEvent("NEXT ACTION", "run as root and check path permissions", COLOR_ORANGE, COLOR_ORANGE)
+    exit
 end if
+
+diagnosticsReady = initDiagnostics(storage)
+if diagnosticsReady then
+    showEvent("TRUSTED BASELINE", STATE_ROOT, COLOR_PURPLE, COLOR_ORANGE)
+    showEvent("DIAGNOSTICS", LOG_PATH, COLOR_PURPLE, COLOR_ORANGE)
+else
+    showEvent("DIAGNOSTICS UNAVAILABLE", LOG_PATH, COLOR_ORANGE, COLOR_ORANGE)
+end if
+sequence = recordDiag("startup", "host=" + originIdentity + " | user=" + active_user + " | mode=" + mode + " | delay=" + refresh)
+showEvent("STARTUP", "persistent system watch ready", COLOR_PURPLE, COLOR_GREEN, sequence)
+showBranch("host", shown(computer.get_name), COLOR_CYAN, "user", active_user, COLOR_PINK)
+showBranch("mode", mode, modeColor, "delay", refresh + "s", COLOR_ORANGE)
+showBranch("hidden-paths", "included", COLOR_GREEN, "baseline-policy", "explicit trust only", COLOR_ORANGE)
 
 migration = migrateLegacyState(storage)
 if migration["found"] == 1 then
     if migration["ok"] != 1 then
-        exit(paint("AUTOSENTRY MIGRATION BLOCKED", C.delete) + " | " + migration["reason"] + char(10) +
-            "The old /root/sentry folder was preserved. Resolve it, then run /bin/autosentry again.")
+        sequence = recordDiag("migration blocked", "source=" + LEGACY_STATE_ROOT + " | reason=" + migration["reason"])
+        showEvent("MIGRATION BLOCKED", "legacy state preserved", COLOR_RED, COLOR_RED, sequence)
+        showBranch("source", LEGACY_STATE_ROOT, COLOR_ORANGE, "destination", STATE_ROOT, COLOR_ORANGE)
+        showBranch("reason", migration["reason"], COLOR_RED)
+        showEvent("NEXT ACTION", "resolve legacy state, then run /bin/autosentry again", COLOR_ORANGE, COLOR_ORANGE)
+        exit
     end if
     if migration["migrated"] == 1 then
-        print(paint("LEGACY BASELINE MIGRATED", C.good) + " | /root/sentry -> " + STATE_ROOT)
-        print(paint("One-time state-folder additions/deletions may be reported; review them before autosentry accept.", C.issue))
+        sequence = recordDiag("legacy baseline migrated", "source=" + LEGACY_STATE_ROOT + " | destination=" + STATE_ROOT)
+        showEvent("LEGACY BASELINE", "migration complete", COLOR_PURPLE, COLOR_GREEN, sequence)
+        showBranch("source", LEGACY_STATE_ROOT, COLOR_ORANGE, "destination", STATE_ROOT, COLOR_ORANGE)
+        showEvent("OPERATOR REVIEW", "one-time state-folder changes may appear", COLOR_ORANGE, COLOR_ORANGE)
     end if
     if migration["removed"] == 1 then
-        print(paint("COMMAND COLLISION REMOVED", C.good) + " | retired /root/sentry")
+        sequence = recordDiag("command collision removed", "retired=" + LEGACY_STATE_ROOT)
+        showEvent("COMMAND COLLISION", "legacy path retired", COLOR_PURPLE, COLOR_GREEN, sequence)
+        showBranch("path", LEGACY_STATE_ROOT, COLOR_ORANGE, "state", "removed", COLOR_GREEN)
     else
-        print(paint("WARNING", C.issue) + " migrated state is safe, but /root/sentry could not be removed automatically")
+        sequence = recordDiag("legacy cleanup unavailable", "path=" + LEGACY_STATE_ROOT)
+        showEvent("WARNING", "legacy path could not be removed automatically", COLOR_ORANGE, COLOR_ORANGE, sequence)
+        showBranch("path", LEGACY_STATE_ROOT, COLOR_ORANGE, "baseline", "safe", COLOR_GREEN)
     end if
 end if
 
-print("Scanning / without printing a filesystem tree ...")
+sequence = recordDiag("filesystem scan", "root=/ | tree-output=disabled")
+showEvent("FILESYSTEM SCAN", "visible system state enumeration", COLOR_PURPLE, COLOR_CYAN, sequence)
+showBranch("root", "/", COLOR_ORANGE, "tree-output", "disabled", COLOR_ORANGE)
 currentFilesystem = scanFilesystem
 stamp = "[" + current_date + "]"
 baseline = loadBaseline
@@ -970,91 +1145,169 @@ startupChanges = {"added": 0, "deleted": 0, "modified": 0}
 if baseline["state"] == "missing" then
     saved = saveBaseline(currentFilesystem["entries"], storage)
     if saved["ok"] != 1 then
-        exit(paint("AUTOSENTRY ERROR", C.delete) + " first baseline was not committed: " + saved["reason"])
+        sequence = recordDiag("baseline create failed", "reason=" + saved["reason"])
+        showEvent("BASELINE FAILED", "first trusted state was not committed", COLOR_RED, COLOR_RED, sequence)
+        showBranch("reason", saved["reason"], COLOR_RED, "path", STATE_ROOT, COLOR_ORANGE)
+        exit
     end if
     createdBaseline = true
-    print(stamp + " " + paint("TRUSTED BASELINE CREATED", C.good) +
-        " | bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"])
+    sequence = recordDiag("trusted baseline created", "time=" + stamp + " | bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"])
+    showEvent("TRUSTED BASELINE", "created", COLOR_PURPLE, COLOR_GREEN, sequence)
+    showBranch("time", stamp, COLOR_DIM, "bank", saved["bank"], COLOR_PINK)
+    showBranch("shards", saved["shards"], COLOR_CYAN, "items", saved["entries"], COLOR_CYAN)
 else if baseline["state"] == "invalid" then
-    print(paint("AUTOSENTRY ALERT", C.delete) + " saved baseline is invalid: " + baseline["reason"])
-    print("The current system was not trusted and the previous state was not overwritten.")
-    if mode != "accept" then exit("Run autosentry accept only after reviewing the machine and deciding to rebuild trust.")
-    answer = user_input("Type REBUILD to replace the invalid baseline with the current filesystem: ").trim.upper
-    if answer != "REBUILD" then exit(paint("Baseline unchanged.", C.issue))
+    sequence = recordDiag("baseline invalid", "reason=" + baseline["reason"] + " | current-system-trusted=no")
+    showEvent("BASELINE INVALID", "saved trust cannot be verified", COLOR_RED, COLOR_RED, sequence)
+    showBranch("reason", baseline["reason"], COLOR_RED, "current-trusted", "no", COLOR_ORANGE)
+    showEvent("TRUST PRESERVED", "current system was not accepted", COLOR_PURPLE, COLOR_GREEN)
+    if mode != "accept" then
+        showEvent("REBUILD BLOCKED", "run autosentry accept only after reviewing the machine", COLOR_ORANGE, COLOR_ORANGE)
+        exit
+    end if
+    answer = requestConfirmation("BASELINE INVALID", "REBUILD", COLOR_RED)
+    if answer != "REBUILD" then
+        sequence = recordDiag("baseline unchanged", "confirmation=declined")
+        showEvent("BASELINE UNCHANGED", "REBUILD was not confirmed", COLOR_PURPLE, COLOR_GREEN, sequence)
+        exit
+    end if
     saved = saveBaseline(currentFilesystem["entries"], storage)
-    if saved["ok"] != 1 then exit(paint("AUTOSENTRY ERROR", C.delete) + " baseline rebuild failed: " + saved["reason"])
-    print(paint("TRUSTED BASELINE REBUILT", C.good) +
-        " | bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"])
+    if saved["ok"] != 1 then
+        sequence = recordDiag("baseline rebuild failed", "reason=" + saved["reason"])
+        showEvent("BASELINE REBUILD FAILED", saved["reason"], COLOR_RED, COLOR_RED, sequence)
+        exit
+    end if
+    sequence = recordDiag("trusted baseline rebuilt", "bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"])
+    showEvent("TRUSTED BASELINE", "rebuilt after explicit confirmation", COLOR_PURPLE, COLOR_GREEN, sequence)
+    showBranch("bank", saved["bank"], COLOR_PINK, "shards", saved["shards"], COLOR_CYAN)
+    showBranch("items", saved["entries"], COLOR_CYAN, "confirmation", "REBUILD", COLOR_ORANGE)
     exit
 else
     repair = repairInterleavedBaseline(baseline["entries_map"])
     if repair["state"] == "mixed" or repair["state"] == "invalid" then
-        exit(paint("AUTOSENTRY ERROR", C.delete) +
-            " trusted baseline has a mixed or ambiguous pipe-encoding state; baseline preserved")
+        sequence = recordDiag("baseline encoding blocked", "state=" + repair["state"] + " | baseline-preserved=yes")
+        showEvent("BASELINE ENCODING", "mixed or ambiguous state", COLOR_RED, COLOR_RED, sequence)
+        showBranch("state", repair["state"], COLOR_RED, "baseline-preserved", "yes", COLOR_GREEN)
+        exit
     end if
     if repair["state"] == "repairable" then
         saved = saveBaseline(repair["entries"], storage)
         if saved["ok"] != 1 then
-            exit(paint("AUTOSENTRY ERROR", C.delete) + " baseline encoding repair failed: " + saved["reason"])
+            sequence = recordDiag("baseline encoding repair failed", "reason=" + saved["reason"])
+            showEvent("BASELINE REPAIR FAILED", saved["reason"], COLOR_RED, COLOR_RED, sequence)
+            exit
         end if
         baseline = loadBaseline
         if baseline["state"] != "ready" then
-            exit(paint("AUTOSENTRY ERROR", C.delete) + " repaired baseline did not verify")
+            sequence = recordDiag("baseline repair verification failed", "state=" + baseline["state"])
+            showEvent("BASELINE REPAIR FAILED", "repaired state did not verify", COLOR_RED, COLOR_RED, sequence)
+            showBranch("state", baseline["state"], COLOR_RED)
+            exit
         end if
         repairedBaseline = true
-        print(stamp + " " + paint("TRUSTED BASELINE ENCODING REPAIRED", C.good) +
-            " | entries=" + repair["count"] + " | bank=" + baseline["active"])
+        sequence = recordDiag("baseline encoding repaired", "time=" + stamp + " | entries=" + repair["count"] + " | bank=" + baseline["active"])
+        showEvent("TRUSTED BASELINE", "encoding repaired", COLOR_PURPLE, COLOR_GREEN, sequence)
+        showBranch("time", stamp, COLOR_DIM, "entries", repair["count"], COLOR_CYAN)
+        showBranch("bank", baseline["active"], COLOR_PINK)
     end if
-    print(stamp + " " + paint("TRUSTED BASELINE LOADED", C.good) +
-        " | saved=" + baseline["saved"] + " | bank=" + baseline["active"] +
-        " | shards=" + baseline["shards"] + " | items=" + baseline["entries"])
+    sequence = recordDiag("trusted baseline loaded", "time=" + stamp + " | saved=" + baseline["saved"] + " | bank=" + baseline["active"] + " | shards=" + baseline["shards"] + " | items=" + baseline["entries"])
+    showEvent("TRUSTED BASELINE", "loaded", COLOR_PURPLE, COLOR_GREEN, sequence)
+    showBranch("time", stamp, COLOR_DIM, "saved", baseline["saved"], COLOR_DIM)
+    showBranch("bank", baseline["active"], COLOR_PINK, "shards", baseline["shards"], COLOR_CYAN)
+    showBranch("items", baseline["entries"], COLOR_CYAN)
     startupChanges = emitFilesystemChanges(baseline["entries_map"], currentFilesystem["entries"], stamp)
     startupTotal = startupChanges["added"] + startupChanges["deleted"] + startupChanges["modified"]
     if startupTotal == 0 then
-        print(stamp + " " + paint("PERSISTENT CHECK CLEAN", C.good) + " | no filesystem changes since the trusted baseline")
+        sequence = recordDiag("persistent check clean", "time=" + stamp + " | changes=0")
+        showEvent("PERSISTENT CHECK", "clean", COLOR_PURPLE, COLOR_GREEN, sequence)
+        showBranch("time", stamp, COLOR_DIM, "changes", 0, COLOR_GREEN)
     else
-        print(stamp + " " + paint("PERSISTENT CHANGES DETECTED", C.delete) +
-            " | added=" + startupChanges["added"] + " | deleted=" + startupChanges["deleted"] +
-            " | modified=" + startupChanges["modified"])
-        print(paint("Trusted baseline preserved. Review alerts; run autosentry accept only when known-safe.", C.issue))
+        sequence = recordDiag("persistent changes detected", "time=" + stamp + " | added=" + startupChanges["added"] + " | deleted=" + startupChanges["deleted"] + " | modified=" + startupChanges["modified"])
+        showEvent("PERSISTENT CHECK", "changes detected", COLOR_PURPLE, COLOR_RED, sequence)
+        showBranch("time", stamp, COLOR_DIM, "added", startupChanges["added"], COLOR_ORANGE)
+        showBranch("deleted", startupChanges["deleted"], COLOR_RED, "modified", startupChanges["modified"], COLOR_ORANGE)
+        showEvent("TRUST PRESERVED", "review alerts; accept only when known-safe", COLOR_PURPLE, COLOR_GREEN)
+        if mode == "watch" then
+            accepted = requestAcceptDecision
+            if accepted then
+                saved = saveBaseline(currentFilesystem["entries"], storage)
+                if saved["ok"] != 1 then
+                    sequence = recordDiag("baseline promotion failed", "reason=" + saved["reason"])
+                    showEvent("BASELINE PROMOTION FAILED", saved["reason"], COLOR_RED, COLOR_RED, sequence)
+                    exit
+                end if
+                sequence = recordDiag("trusted baseline promoted", "bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"] + " | confirmation=Y")
+                showEvent("TRUSTED BASELINE", "promoted", COLOR_PURPLE, COLOR_GREEN, sequence)
+                showBranch("bank", saved["bank"], COLOR_PINK, "shards", saved["shards"], COLOR_CYAN)
+                showBranch("items", saved["entries"], COLOR_CYAN, "confirmation", "Y", COLOR_GREEN)
+            else
+                sequence = recordDiag("baseline unchanged", "confirmation=N")
+                showEvent("BASELINE UNCHANGED", "current changes were not accepted", COLOR_PURPLE, COLOR_GREEN, sequence)
+                showBranch("confirmation", "N", COLOR_ORANGE, "trusted-state", "preserved", COLOR_GREEN)
+            end if
+        end if
     end if
 end if
 
-print("  dirs=" + currentFilesystem["counts"]["dir"] +
-    " files=" + currentFilesystem["counts"]["file"] +
-    " binaries=" + currentFilesystem["counts"]["binary"] +
-    " links=" + currentFilesystem["counts"]["link"] +
-    " hidden=" + currentFilesystem["counts"]["hidden"] +
-    " unknown=" + currentFilesystem["counts"]["unknown"])
+sequence = recordDiag("filesystem inventory", "dirs=" + currentFilesystem["counts"]["dir"] +
+    " | files=" + currentFilesystem["counts"]["file"] + " | binaries=" + currentFilesystem["counts"]["binary"] +
+    " | links=" + currentFilesystem["counts"]["link"] + " | hidden=" + currentFilesystem["counts"]["hidden"] +
+    " | unknown=" + currentFilesystem["counts"]["unknown"])
+showEvent("FILESYSTEM INVENTORY", "scan complete", COLOR_PURPLE, COLOR_GREEN, sequence)
+showBranch("directories", currentFilesystem["counts"]["dir"], COLOR_CYAN, "files", currentFilesystem["counts"]["file"], COLOR_CYAN)
+showBranch("binaries", currentFilesystem["counts"]["binary"], COLOR_CYAN, "links", currentFilesystem["counts"]["link"], COLOR_CYAN)
+showBranch("hidden", currentFilesystem["counts"]["hidden"], COLOR_PINK, "unknown", currentFilesystem["counts"]["unknown"], COLOR_ORANGE)
 
 if active_user != "root" then
-    print(paint("WARNING: not running as root; inaccessible items may be absent.", C.issue))
+    sequence = recordDiag("authority warning", "user=" + active_user + " | inaccessible-items=possible")
+    showEvent("AUTHORITY WARNING", "inaccessible items may be absent", COLOR_ORANGE, COLOR_ORANGE, sequence)
+    showBranch("user", active_user, COLOR_PINK, "required", "root", COLOR_PINK)
 end if
 if not currentFilesystem["symlink_api"] then
-    print(paint("WARNING: this runtime does not expose is_symlink; link safety/classification cannot be guaranteed.", C.issue))
+    sequence = recordDiag("runtime warning", "is_symlink=unavailable | link-classification=not-guaranteed")
+    showEvent("RUNTIME WARNING", "link safety classification unavailable", COLOR_ORANGE, COLOR_ORANGE, sequence)
+    showBranch("api", "is_symlink", COLOR_CYAN, "guaranteed", "no", COLOR_ORANGE)
 end if
 
 if mode == "accept" then
     if createdBaseline then
-        print(paint("The first trusted baseline is ready; no second promotion was needed.", C.good))
+        sequence = recordDiag("baseline ready", "first-baseline=yes | promotion-needed=no")
+        showEvent("TRUSTED BASELINE", "first baseline ready", COLOR_PURPLE, COLOR_GREEN, sequence)
+        showBranch("promotion-needed", "no", COLOR_GREEN)
         exit
     end if
     startupTotal = startupChanges["added"] + startupChanges["deleted"] + startupChanges["modified"]
     if startupTotal == 0 then
-        print(paint("Current filesystem already matches the trusted baseline.", C.good))
+        sequence = recordDiag("baseline match", "changes=0 | promotion-needed=no")
+        showEvent("TRUSTED BASELINE", "current filesystem already matches", COLOR_PURPLE, COLOR_GREEN, sequence)
+        showBranch("changes", 0, COLOR_GREEN, "promotion-needed", "no", COLOR_GREEN)
         exit
     end if
-    answer = user_input("Type ACCEPT to replace the trusted baseline with the current filesystem: ").trim.upper
-    if answer != "ACCEPT" then exit(paint("Baseline unchanged.", C.issue))
+    answer = requestConfirmation("CHANGES DETECTED", "ACCEPT", COLOR_ORANGE)
+    if answer != "ACCEPT" then
+        sequence = recordDiag("baseline unchanged", "confirmation=declined")
+        showEvent("BASELINE UNCHANGED", "ACCEPT was not confirmed", COLOR_PURPLE, COLOR_GREEN, sequence)
+        exit
+    end if
     saved = saveBaseline(currentFilesystem["entries"], storage)
-    if saved["ok"] != 1 then exit(paint("AUTOSENTRY ERROR", C.delete) + " baseline promotion failed: " + saved["reason"])
-    print(paint("TRUSTED BASELINE PROMOTED", C.good) +
-        " | bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"])
+    if saved["ok"] != 1 then
+        sequence = recordDiag("baseline promotion failed", "reason=" + saved["reason"])
+        showEvent("BASELINE PROMOTION FAILED", saved["reason"], COLOR_RED, COLOR_RED, sequence)
+        exit
+    end if
+    sequence = recordDiag("trusted baseline promoted", "bank=" + saved["bank"] + " | shards=" + saved["shards"] + " | items=" + saved["entries"] + " | confirmation=ACCEPT")
+    showEvent("TRUSTED BASELINE", "promoted", COLOR_PURPLE, COLOR_GREEN, sequence)
+    showBranch("bank", saved["bank"], COLOR_PINK, "shards", saved["shards"], COLOR_CYAN)
+    showBranch("items", saved["entries"], COLOR_CYAN, "confirmation", "ACCEPT", COLOR_ORANGE)
     exit
 end if
 
 if mode == "check" then
-    if not createdBaseline then print(paint("One-shot comparison complete. Trusted baseline unchanged.", C.cyan))
+    if not createdBaseline then
+        sequence = recordDiag("one-shot complete", "baseline-unchanged=yes")
+        showEvent("ONE-SHOT CHECK", "complete", COLOR_PURPLE, COLOR_GREEN, sequence)
+        showBranch("baseline-unchanged", "yes", COLOR_GREEN)
+    end if
+    showSignature("CHECK COMPLETE")
     exit
 end if
 
@@ -1066,15 +1319,20 @@ if previousIssues.indexes.len > 0 then
     issueNames = previousIssues.indexes
     issueNames.sort
     for issue in issueNames
-        print(stamp + " " + paint("SCAN ISSUE", C.issue) + " " + issue)
+        sequence = recordDiag("scan issue", "time=" + stamp + " | state=open | detail=" + issue)
+        showEvent("SCAN HEALTH", "issue detected", COLOR_PURPLE, COLOR_ORANGE, sequence)
+        showBranch("time", stamp, COLOR_DIM, "state", "open", COLOR_ORANGE)
+        showBranch("detail", issue, COLOR_ORANGE)
     end for
 end if
 
-print(stamp + " " + paint("LIVE WATCH READY", C.good) +
-    " | items=" + filesystemTotal(previousFilesystem) +
-    " | processes=" + previousProcesses.indexes.len +
-    " | issues=" + previousIssues.indexes.len + " | delay=" + refresh + "s")
-print(paint("Watching now. Press Ctrl+C to stop.", C.title))
+sequence = recordDiag("live watch ready", "time=" + stamp + " | items=" + filesystemTotal(previousFilesystem) +
+    " | processes=" + previousProcesses.indexes.len + " | issues=" + previousIssues.indexes.len + " | delay=" + refresh + "s")
+showEvent("LIVE WATCH", "ready", COLOR_PURPLE, COLOR_GREEN, sequence)
+showBranch("time", stamp, COLOR_DIM, "delay", refresh + "s", COLOR_ORANGE)
+showBranch("items", filesystemTotal(previousFilesystem), COLOR_CYAN, "processes", previousProcesses.indexes.len, COLOR_CYAN)
+showBranch("issues", previousIssues.indexes.len, COLOR_ORANGE, "stop", "Ctrl+C", COLOR_ORANGE)
+showSignature("LIVE WATCH")
 
 quietScans = 0
 while true
@@ -1097,13 +1355,20 @@ while true
 
     if eventCount > 0 then
         quietScans = 0
-        print(stamp + " event summary | items=" + filesystemTotal(currentFilesystem) +
-            " processes=" + currentProcesses.indexes.len + " issues=" + currentIssues.indexes.len + " events=" + eventCount)
+        sequence = recordDiag("event summary", "time=" + stamp + " | items=" + filesystemTotal(currentFilesystem) +
+            " | processes=" + currentProcesses.indexes.len + " | issues=" + currentIssues.indexes.len + " | events=" + eventCount)
+        showEvent("EVENT SUMMARY", "change cycle complete", COLOR_PURPLE, COLOR_ORANGE, sequence)
+        showBranch("time", stamp, COLOR_DIM, "events", eventCount, COLOR_ORANGE)
+        showBranch("items", filesystemTotal(currentFilesystem), COLOR_CYAN, "processes", currentProcesses.indexes.len, COLOR_CYAN)
+        showBranch("issues", currentIssues.indexes.len, COLOR_ORANGE)
     else
         quietScans = quietScans + 1
         if quietScans >= 30 then
-            print(stamp + " heartbeat | 30 quiet scans | items=" + filesystemTotal(currentFilesystem) +
-                " processes=" + currentProcesses.indexes.len + " issues=" + currentIssues.indexes.len)
+            sequence = recordDiag("heartbeat", "time=" + stamp + " | quiet-scans=30 | items=" + filesystemTotal(currentFilesystem) +
+                " | processes=" + currentProcesses.indexes.len + " | issues=" + currentIssues.indexes.len)
+            showEvent("HEARTBEAT", "30 quiet scans", COLOR_PURPLE, COLOR_GREEN, sequence)
+            showBranch("time", stamp, COLOR_DIM, "items", filesystemTotal(currentFilesystem), COLOR_CYAN)
+            showBranch("processes", currentProcesses.indexes.len, COLOR_CYAN, "issues", currentIssues.indexes.len, COLOR_ORANGE)
             quietScans = 0
         end if
     end if

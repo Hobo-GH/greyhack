@@ -1,16 +1,20 @@
 //Made By Hobo & Rowan
-// AutoRoute 2.1.0-rc1 owned-route and AutoNet proxy controller for Grey Hack Public v0.9.6773.
+// AutoRoute 2.1.1 owned-route and AutoNet proxy controller for Grey Hack Public v0.9.6773.
 //
 // First run asks for an ordered SSH route and saves it outside the source.
 // AutoRoute keeps that trusted chain separate from the verified AutoNet node
 // database, then optionally extends and collapses a temporary proxy layer.
+// A ready proxy route is published on the final owned server for AutoDeploy;
+// collapse removes that active handoff before the final owned-route cleanup.
 
-SCRIPT_VERSION = "2.1.0-rc1"
+SCRIPT_VERSION = "2.1.1"
+PIN = ""
 
 AUTOSCRIPTS_ROOT = "/root/autoscripts"
 NETWORK_ROOT = "/root/autoscripts/network"
 NETWORK_INDEX_PATH = "/root/autoscripts/network/index.txt"
 OWNED_ROUTE_PATH = "/root/autoscripts/network/owned-route.txt"
+ACTIVE_PROXY_ROUTE_PATH = "/root/autoscripts/network/active-proxy-route.txt"
 AUTONET_NODE_ROOT = "/root/autoscripts/autonet/nodes"
 AUTONET_NODE_INDEX_PATH = "/root/autoscripts/autonet/nodes/index.txt"
 AUTONET_NODE_INDEX_HEADER = "ANNODEINDEX1"
@@ -18,6 +22,7 @@ AUTONET_NODE_SHARD_HEADER = "ANNODES1"
 AUTONET_NODE_SHARD_PREFIX = "ssh-"
 NETWORK_INDEX_HEADER = "ASNETINDEX1"
 ROUTE_HEADER = "ASOWNED1"
+ACTIVE_PROXY_ROUTE_HEADER = "ASPROXY1"
 MAX_HOPS = 8
 DEFAULT_HOPS = 2
 MAX_PROXY_HOPS = 50
@@ -43,10 +48,69 @@ COLOR_GREEN = "#63FF9B"
 COLOR_RED = "#FF5C7C"
 COLOR_ORANGE = "#FFB86B"
 COLOR_PINK = "#FF79C6"
+COLOR_LAVENDER = "#C7A7E8"
+COLOR_DIM = "#A79BC8"
 
 
 paint = function(value, color)
     return "<color=" + color + ">" + str(value) + "</color>"
+end function
+
+
+event_line = function(label, label_color, detail = "", detail_color = COLOR_LAVENDER)
+    line = paint("◆ " + label, label_color)
+    if detail != "" then line = line + "  " + paint(detail, detail_color)
+    return line
+end function
+
+
+event_branch = function(label, label_color, detail = "", detail_color = COLOR_LAVENDER)
+    line = paint("  ╰ " + label, label_color)
+    if detail != "" then line = line + "  " + paint(detail, detail_color)
+    return line
+end function
+
+
+route_heading = function(title, detail = "")
+    line = char(10) + paint("◆ " + title, COLOR_PURPLE)
+    if detail != "" then line = line + "  " + paint(detail, COLOR_CYAN)
+    print(line)
+end function
+
+
+fatal_line = function(message)
+    return paint("AUTOROUTE REFUSED", COLOR_RED) + " | " + paint(message, COLOR_ORANGE)
+end function
+
+
+route_pin_signature = function()
+    origin = "NO ORIGIN"
+    if is_computer(globals.local_computer) then
+        origin = globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+    end if
+    top = paint("╭─◆ AUTOROUTE ◆─", COLOR_PURPLE) +
+        paint("[PIN REQUIRED]", COLOR_ORANGE)
+    bottom = paint("╰─", COLOR_PURPLE) + paint("ORIGIN ", COLOR_ORANGE) +
+        paint(origin, COLOR_CYAN) + paint(" ─▶ ", COLOR_GREEN) +
+        paint("ENTER PIN", COLOR_PINK) + paint(" ─▶ ", COLOR_GREEN)
+    return top + char(10) + bottom
+end function
+
+
+show_auto_action = function(label, detail = "", color = COLOR_PURPLE, detail_color = COLOR_CYAN)
+    print(event_line(label, color, detail, detail_color))
+end function
+
+
+show_attack_attempt = function(fingerprint, mode)
+    if not globals.hasIndex("visual_attack_index") then
+        globals.visual_attack_index = 0
+    end if
+    globals.visual_attack_index = globals.visual_attack_index + 1
+    print(paint("◆ ATTACK ", COLOR_PURPLE) +
+        paint("[" + globals.visual_attack_index + "]", COLOR_PINK) +
+        "  " +
+        paint(fingerprint, COLOR_CYAN) + "  " + paint(mode, COLOR_ORANGE))
 end function
 
 
@@ -65,6 +129,12 @@ is_computer = function(value)
 end function
 
 
+is_exploit_object = function(value)
+    kind = typeof(value).lower
+    return kind == "shell" or kind == "computer" or kind == "file"
+end function
+
+
 join_path = function(folder, name)
     if folder == "/" then return "/" + name
     if folder[-1] == "/" then return folder + name
@@ -72,8 +142,8 @@ join_path = function(folder, name)
 end function
 
 
-ensure_folder_path = function(path)
-    computer = globals.local_computer
+ensure_folder_path_on = function(computer, path)
+    if not is_computer(computer) then return null
     current = "/"
     for part in path.split("/")
         part = part.trim
@@ -93,6 +163,11 @@ ensure_folder_path = function(path)
 end function
 
 
+ensure_folder_path = function(path)
+    return ensure_folder_path_on(globals.local_computer, path)
+end function
+
+
 ensure_network_layout = function()
     network = ensure_folder_path(NETWORK_ROOT)
     if not is_file(network) then return false
@@ -101,8 +176,19 @@ ensure_network_layout = function()
         if globals.local_computer.touch(NETWORK_ROOT, "index.txt") != 1 then return false
         index = globals.local_computer.File(NETWORK_INDEX_PATH)
         if not is_file(index) then return false
-        lines = [NETWORK_INDEX_HEADER, "O|owned-route.txt"]
+        lines = [NETWORK_INDEX_HEADER, "O|owned-route.txt", "P|active-proxy-route.txt|" +
+            ACTIVE_PROXY_ROUTE_HEADER]
         if index.set_content(lines.join(char(10))) != 1 then return false
+    else if not index.is_binary then
+        content = index.get_content
+        if typeof(content).lower != "string" then return false
+        lines = content.replace(char(13), "").split(char(10))
+        if lines.len == 0 or lines[0].trim != NETWORK_INDEX_HEADER then return false
+        record = "P|active-proxy-route.txt|" + ACTIVE_PROXY_ROUTE_HEADER
+        if lines.indexOf(record) == null then
+            lines.push(record)
+            if index.set_content(lines.join(char(10))) != 1 then return false
+        end if
     end if
     return true
 end function
@@ -127,34 +213,143 @@ safe_field = function(value)
 end function
 
 
+final_owned_computer = function()
+    if globals.shells.len < 2 then return null
+    shell = globals.shells[-1]
+    if not is_shell(shell) then return null
+    return shell.host_computer
+end function
+
+
+ensure_remote_network_layout = function(computer)
+    if not is_computer(computer) then return false
+    network = ensure_folder_path_on(computer, NETWORK_ROOT)
+    if not is_file(network) then return false
+    index = computer.File(NETWORK_INDEX_PATH)
+    record = "P|active-proxy-route.txt|" + ACTIVE_PROXY_ROUTE_HEADER
+    if not is_file(index) then
+        if computer.touch(NETWORK_ROOT, "index.txt") != 1 then return false
+        index = computer.File(NETWORK_INDEX_PATH)
+        if not is_file(index) then return false
+        if index.set_content([NETWORK_INDEX_HEADER, record].join(char(10))) != 1 then return false
+    else
+        if index.is_folder or index.is_binary then return false
+        content = index.get_content
+        if typeof(content).lower != "string" then return false
+        lines = content.replace(char(13), "").split(char(10))
+        if lines.len == 0 or lines[0].trim != NETWORK_INDEX_HEADER then return false
+        if lines.indexOf(record) == null then
+            lines.push(record)
+            if index.set_content(lines.join(char(10))) != 1 then return false
+        end if
+    end if
+    return true
+end function
+
+
+active_proxy_route_file = function(create = false)
+    computer = final_owned_computer
+    if not is_computer(computer) then return null
+    file = computer.File(ACTIVE_PROXY_ROUTE_PATH)
+    if is_file(file) then return file
+    if not create then return null
+    if not ensure_remote_network_layout(computer) then return null
+    if computer.touch(NETWORK_ROOT, "active-proxy-route.txt") != 1 then return null
+    return computer.File(ACTIVE_PROXY_ROUTE_PATH)
+end function
+
+
+delete_active_proxy_manifest = function(silent = false)
+    file = active_proxy_route_file
+    if not is_file(file) then
+        globals.proxy_manifest_active = false
+        globals.proxy_manifest_count = 0
+        globals.proxy_manifest_endpoint = "none"
+        return true
+    end if
+    file.delete
+    if is_file(active_proxy_route_file) then
+        if not silent then
+            print(event_line("AUTODEPLOY HANDOFF", COLOR_RED, "retirement failed", COLOR_RED))
+        end if
+        return false
+    end if
+    globals.proxy_manifest_active = false
+    globals.proxy_manifest_count = 0
+    globals.proxy_manifest_endpoint = "none"
+    if not silent then print(event_line("AUTODEPLOY HANDOFF", COLOR_GREEN, "retired", COLOR_GREEN))
+    return true
+end function
+
+
+write_active_proxy_manifest = function()
+    if globals.proxy_nodes.len == 0 then return false
+    lines = [ACTIVE_PROXY_ROUTE_HEADER]
+    index = 0
+    for node in globals.proxy_nodes
+        fields = [str(index + 1), str(node.ip), str(node.port), str(node.user),
+            str(node.password)]
+        for field in fields
+            if not safe_field(field) then
+                print(event_line("AUTODEPLOY HANDOFF", COLOR_RED,
+                    "unsafe proxy field refused", COLOR_RED))
+                return false
+            end if
+        end for
+        lines.push("P|" + fields.join("|"))
+        index = index + 1
+    end for
+    file = active_proxy_route_file(true)
+    if not is_file(file) or file.is_folder or file.is_binary then return false
+    payload = lines.join(char(10))
+    if file.set_content(payload) != 1 then return false
+    check = file.get_content
+    if typeof(check).lower != "string" or check != payload then return false
+    globals.proxy_manifest_active = true
+    globals.proxy_manifest_count = globals.proxy_nodes.len
+    globals.proxy_manifest_endpoint = globals.proxy_nodes[-1].ip
+    print(event_line("AUTODEPLOY HANDOFF", COLOR_GREEN, "READY", COLOR_GREEN))
+    print(event_branch("NODES", COLOR_PINK, globals.proxy_manifest_count, COLOR_PINK) +
+        "  " + paint("ENDPOINT", COLOR_CYAN) + "  " +
+        paint(globals.proxy_manifest_endpoint, COLOR_CYAN))
+    print(event_branch("MANIFEST", COLOR_ORANGE, ACTIVE_PROXY_ROUTE_PATH, COLOR_ORANGE))
+    print(event_branch("CREDENTIALS", COLOR_PINK, "masked", COLOR_PINK))
+    return true
+end function
+
+
 prompt_nonempty = function(label, hidden = false, fallback = "")
     while true
         if hidden then value = user_input(label, 1) else value = user_input(label)
         value = value.trim
         if value == "" and fallback != "" then value = fallback
         if value != "" and safe_field(value) then return value
-        print(paint("A value is required; the | character is not allowed.", COLOR_RED))
+        print(event_line("VALUE REFUSED", COLOR_RED,
+            "required value cannot contain |", COLOR_RED))
     end while
 end function
 
 
 setup_route = function()
-    print(paint("AutoRoute first-run owned-route setup", COLOR_PURPLE))
-    print("The owned route is saved at " + paint(OWNED_ROUTE_PATH, COLOR_CYAN) + ".")
-    print("Passwords are masked while entered and never printed afterward.")
+    route_heading("OWNED ROUTE SETUP", "FIRST RUN")
+    print(event_line("ROUTE STORAGE", COLOR_PURPLE, OWNED_ROUTE_PATH, COLOR_ORANGE))
+    print(event_branch("CREDENTIALS", COLOR_PINK,
+        "masked during entry and never printed", COLOR_PINK))
 
     count_text = user_input("SSH hop count [" + DEFAULT_HOPS + "]: ").trim
     if count_text == "" then count = DEFAULT_HOPS else count = count_text.to_int
     if typeof(count).lower != "number" then return null
     if count < 1 or count > MAX_HOPS then
-        print(paint("Hop count must be between 1 and " + MAX_HOPS + ".", COLOR_RED))
+        print(event_line("HOP COUNT REFUSED", COLOR_RED,
+            "expected 1-" + MAX_HOPS, COLOR_RED))
         return null
     end if
 
     hops = []
     number = 1
     while number <= count
-        print(char(10) + paint("SSH hop " + number + " of " + count, COLOR_PURPLE))
+        print(char(10) + paint("◆ SSH HOP ", COLOR_PURPLE) +
+            paint(number + "/" + count, COLOR_PINK))
         alias = prompt_nonempty("Alias [hop" + number + "]: ", false, "hop" + number)
         ip = ""
         while ip == ""
@@ -162,14 +357,14 @@ setup_route = function()
             if is_valid_ip(candidate) then
                 ip = candidate
             else
-                print(paint("That is not a valid IP address.", COLOR_RED))
+                print(event_line("IP REFUSED", COLOR_RED, candidate, COLOR_CYAN))
             end if
         end while
 
         port_text = user_input("SSH port [" + DEFAULT_SSH_PORT + "]: ").trim
         if port_text == "" then port = DEFAULT_SSH_PORT else port = port_text.to_int
         if typeof(port).lower != "number" or port < 1 or port > 65535 then
-            print(paint("Invalid SSH port.", COLOR_RED))
+            print(event_line("PORT REFUSED", COLOR_RED, port_text, COLOR_CYAN))
             return null
         end if
 
@@ -186,7 +381,8 @@ setup_route = function()
     file = route_file(true)
     if not is_file(file) then return null
     if file.set_content(lines.join(char(10))) != 1 then return null
-    print(char(10) + paint("Route saved: ", COLOR_GREEN) + paint(hops.len + " hop(s)", COLOR_CYAN))
+    print(char(10) + event_line("OWNED ROUTE SAVED", COLOR_GREEN,
+        hops.len + " hops", COLOR_GREEN))
     return hops
 end function
 
@@ -210,7 +406,7 @@ load_route = function()
         if typeof(port).lower != "number" or port < 1 or port > 65535 then continue
         if parts[1] == "" or parts[4] == "" or parts[5] == "" then continue
         hops.push({"alias": parts[1], "ip": parts[2], "port": port,
-            "user": parts[4], "password": parts[5]})
+            "user": parts[4], "password": parts[5],})
     end for
     if hops.len == 0 or hops.len > MAX_HOPS then return null
     return hops
@@ -218,11 +414,13 @@ end function
 
 
 show_route = function(hops)
-    print(paint("Configured route", COLOR_PURPLE))
+    route_heading("CONFIGURED ROUTE", hops.len + " HOPS")
     number = 1
     for hop in hops
-        print("  " + paint(number, COLOR_PINK) + "  " + paint(hop.alias, COLOR_GREEN) +
-            "  " + paint(hop.user + "@" + hop.ip + ":" + hop.port, COLOR_CYAN))
+        print(paint("◆ OWNED HOP ", COLOR_PURPLE) + paint("[" + number + "]", COLOR_PINK) +
+            "  " + paint(hop.alias, COLOR_PINK))
+        print(event_branch("ENDPOINT", COLOR_CYAN, hop.ip + ":" + hop.port, COLOR_CYAN) +
+            "  " + paint("AUTHORITY", COLOR_PINK) + "  " + paint(hop.user, COLOR_PINK))
         number = number + 1
     end for
 end function
@@ -320,7 +518,7 @@ load_autonet_nodes = function(base_shell)
             nodes.push({"id": parts[1], "ip": parts[2], "port": port,
                 "user": parts[4], "password": parts[5], "lan": parts[6],
                 "verified": parts[7], "computer_clean": parts[8],
-                "router_clean": parts[9], "source": parts[10]})
+                "router_clean": parts[9], "source": parts[10],})
         end for
     end for
     return nodes
@@ -329,25 +527,30 @@ end function
 
 show_autonet_nodes = function()
     if globals.shells.len < 2 then
-        print(paint("The owned route is not ready.", COLOR_RED))
+        print(event_line("AUTONET PROXY POOL", COLOR_RED, "owned route not ready", COLOR_RED))
         return
     end if
     nodes = load_autonet_nodes(globals.shells[-1])
-    print(paint("AutoNet proxy pool", COLOR_PURPLE))
+    route_heading("AUTONET PROXY POOL", nodes.len + " VERIFIED")
     if nodes.len == 0 then
-        print(paint("No verified AutoNet nodes are available on the final owned server.", COLOR_ORANGE))
+        print(event_line("NO VERIFIED NODES", COLOR_ORANGE,
+            "final owned server pool is empty", COLOR_ORANGE))
         return
     end if
     index = 0
     for node in nodes
-        router_color = COLOR_RED
+        router_color = COLOR_ORANGE
         if node.router_clean == "yes" then router_color = COLOR_GREEN
-        print("  " + paint("[" + index + "]", COLOR_PINK) + " " +
-            paint(node.ip + ":" + node.port, COLOR_CYAN) + " root  verified=" +
-            node.verified + "  prior-router-clean=" + paint(node.router_clean, router_color))
+        print(paint("◆ NODE ", COLOR_PURPLE) + paint("[" + index + "]", COLOR_PINK) +
+            "  " + paint(node.ip + ":" + node.port, COLOR_CYAN))
+        print(event_branch("AUTHORITY", COLOR_PINK, node.user, COLOR_PINK) +
+            "  " + paint("VERIFIED", COLOR_GREEN) + "  " + paint(node.verified, COLOR_GREEN))
+        print(event_branch("PRIOR ROUTER CLEAN", COLOR_ORANGE,
+            node.router_clean, router_color))
         index = index + 1
     end for
-    print("Available nodes: " + paint(nodes.len, COLOR_GREEN) + "  passwords remain hidden")
+    print(event_line("AVAILABLE NODES", COLOR_GREEN, nodes.len, COLOR_PINK))
+    print(event_branch("CREDENTIALS", COLOR_PINK, "masked", COLOR_PINK))
 end function
 
 
@@ -406,6 +609,56 @@ file_from_root = function(root, path)
         if not is_file(current) then return null
     end for
     return current
+end function
+
+
+has_rwx = function(value)
+    if not is_file(value) then return false
+    if not value.has_permission("r") then return false
+    if not value.has_permission("w") then return false
+    return value.has_permission("x")
+end function
+
+
+access_level = function(value)
+    root = root_from_value(value)
+    if not is_file(root) then return "none"
+    root_home = file_from_root(root, "/root")
+    if has_rwx(root_home) then return "root"
+    home = file_from_root(root, "/home")
+    if not is_file(home) then return "guest"
+    folders = home.get_folders
+    if typeof(folders).lower != "list" then return "guest"
+    for folder in folders
+        if folder.name == "guest" then continue
+        if has_rwx(folder) then return "user"
+    end for
+    return "guest"
+end function
+
+
+show_attack_result = function(value)
+    if value == null then
+        print(event_branch("NO USABLE RESULT", COLOR_RED, "null", COLOR_RED))
+        return
+    end if
+    kind = typeof(value).lower
+    if kind == "number" then
+        print(event_branch("PAYLOAD ACCEPTED", COLOR_GREEN, "numeric return", COLOR_PINK))
+        return
+    end if
+    authority = access_level(value)
+    if kind == "shell" then
+        print(paint("  ╰ ACCESS RETAINED", COLOR_GREEN) + "  " + paint(kind, COLOR_CYAN) +
+            "  authority=" + paint(authority, COLOR_PINK))
+        return
+    end if
+    if kind == "computer" or kind == "file" then
+        print(paint("  ╰ OBJECT RETAINED", COLOR_GREEN) + "  " + paint(kind, COLOR_CYAN) +
+            "  authority=" + paint(authority, COLOR_PINK))
+        return
+    end if
+    print(event_branch("NO USABLE RESULT", COLOR_RED, kind, COLOR_RED))
 end function
 
 
@@ -481,21 +734,37 @@ stage_local_router_source = function()
     if typeof(session).lower != "netsession" then return null
     meta_lib = session.dump_lib
     if typeof(meta_lib).lower != "metalib" then return null
+    fingerprint = meta_lib.lib_name + "@" + meta_lib.version
+    show_auto_action("LIBRARY READY", fingerprint, COLOR_GREEN, COLOR_CYAN)
     regions = provider.scan(meta_lib)
     if typeof(regions).lower != "list" then return null
 
     for region in regions
         for unsafe in unsafe_checks(provider, meta_lib, region)
+            show_attack_attempt(fingerprint, "router LAN payload")
             result = meta_lib.overflow(region, unsafe, router.local_ip)
+            show_attack_result(result)
             if is_shell(result) and not is_shell(globals.last_router_shell) then globals.last_router_shell = result
             source = scrub_source_from_value(result)
-            if is_file(source) and log_writable_from_value(result) then return source
+            if is_file(source) and log_writable_from_value(result) then
+                show_auto_action("ROUTER CLEAN SOURCE READY",
+                    router.public_ip + "/" + router.local_ip, COLOR_GREEN, COLOR_CYAN)
+                return source
+            end if
+            show_attack_attempt(fingerprint, "plain overflow")
             result = meta_lib.overflow(region, unsafe)
+            show_attack_result(result)
             if is_shell(result) and not is_shell(globals.last_router_shell) then globals.last_router_shell = result
             source = scrub_source_from_value(result)
-            if is_file(source) and log_writable_from_value(result) then return source
+            if is_file(source) and log_writable_from_value(result) then
+                show_auto_action("ROUTER CLEAN SOURCE READY",
+                    router.public_ip + "/" + router.local_ip, COLOR_GREEN, COLOR_CYAN)
+                return source
+            end if
         end for
     end for
+    show_auto_action("ROUTER CLEAN SOURCE UNAVAILABLE",
+        router.public_ip + "/" + router.local_ip, COLOR_ORANGE, COLOR_CYAN)
     return null
 end function
 
@@ -641,6 +910,9 @@ reset_proxy_objects = function()
     globals.proxy_router_sources = []
     globals.proxy_helper_paths = []
     globals.proxy_seed_helper_path = ""
+    globals.proxy_manifest_active = false
+    globals.proxy_manifest_count = 0
+    globals.proxy_manifest_endpoint = "none"
 end function
 
 
@@ -663,8 +935,9 @@ stage_proxy_helper_seed = function()
     if globals.shells.len < 2 then return ""
     helper = globals.local_computer.File(PROXY_HELPER_SOURCE)
     if not is_file(helper) or helper.is_folder then
-        print(paint("Proxy helper missing: " + PROXY_HELPER_SOURCE, COLOR_RED))
-        print(paint("Compile autoroute-proxy-helper before using extend.", COLOR_ORANGE))
+        print(event_line("PROXY HELPER MISSING", COLOR_RED, PROXY_HELPER_SOURCE, COLOR_ORANGE))
+        print(event_branch("REQUIRED ACTION", COLOR_ORANGE,
+            "compile autoroute-proxy-helper before extend", COLOR_ORANGE))
         return ""
     end if
 
@@ -682,7 +955,8 @@ stage_proxy_helper_seed = function()
                 wait(FINALIZER_WAIT_SECONDS)
                 clean_stage(index - 1)
             end if
-            print(paint("Could not stage the proxy helper on the owned route.", COLOR_RED))
+            print(event_line("PROXY HELPER STAGING", COLOR_RED,
+                "owned-route propagation failed", COLOR_RED))
             return ""
         end if
         delete_remote_helper(staged_shell, staged_path)
@@ -725,12 +999,14 @@ clean_proxy_stage = function(index)
         router_ok = clean_source(globals.proxy_router_sources[index])
     end if
     computer_color = COLOR_RED
-    router_color = COLOR_RED
+    router_color = COLOR_ORANGE
     if computer_ok then computer_color = COLOR_GREEN
     if router_ok then router_color = COLOR_GREEN
-    print("  " + paint("proxy " + (index + 1), COLOR_PINK) + " " +
-        paint(node.ip, COLOR_CYAN) + "  computer=" +
-        paint(["FAIL", "clean"][computer_ok], computer_color) + "  router=" +
+    print(paint("◆ CLEANUP ", COLOR_ORANGE) + paint("[PROXY " + (index + 1) + "]", COLOR_PINK) +
+        "  " + paint(node.ip, COLOR_CYAN))
+    print(event_branch("COMPUTER", COLOR_ORANGE,
+        ["FAIL", "clean"][computer_ok], computer_color) +
+        "  " + paint("ROUTER", COLOR_ORANGE) + "  " +
         paint(["best-effort", "clean"][router_ok], router_color))
     return computer_ok and router_ok
 end function
@@ -738,7 +1014,7 @@ end function
 
 clean_proxy_all = function()
     if globals.proxy_nodes.len == 0 then return true
-    print(paint("Proxy-layer cleanup", COLOR_ORANGE))
+    route_heading("PROXY-LAYER CLEANUP", globals.proxy_nodes.len + " HOPS")
     all_ok = true
     index = globals.proxy_nodes.len - 1
     while index >= 0
@@ -746,9 +1022,11 @@ clean_proxy_all = function()
         index = index - 1
     end while
     if all_ok then
-        print(paint("Proxy-layer computer and router logs replaced.", COLOR_GREEN))
+        print(event_line("PROXY CLEANUP COMPLETE", COLOR_GREEN,
+            "computer and router logs replaced", COLOR_GREEN))
     else
-        print(paint("Proxy computers were required; unavailable routers remain best-effort risk.", COLOR_ORANGE))
+        print(event_line("PROXY CLEANUP PARTIAL", COLOR_ORANGE,
+            "unavailable routers remain best-effort risk", COLOR_ORANGE))
     end if
     return all_ok
 end function
@@ -756,10 +1034,13 @@ end function
 
 collapse_proxy = function()
     if globals.proxy_nodes.len == 0 then
-        print(paint("Already on the owned route.", COLOR_CYAN))
-        return clean_all
+        print(event_line("OWNED ROUTE", COLOR_GREEN, "already active", COLOR_GREEN))
+        manifest_ok = delete_active_proxy_manifest
+        wait(FINALIZER_WAIT_SECONDS)
+        owned_ok = clean_all
+        return manifest_ok and owned_ok
     end if
-    print(paint("Collapsing proxy layer", COLOR_ORANGE))
+    route_heading("COLLAPSING PROXY LAYER", globals.proxy_nodes.len + " HOPS")
     proxy_ok = true
     index = globals.proxy_nodes.len - 1
     while index >= 0
@@ -771,12 +1052,17 @@ collapse_proxy = function()
         if not clean_proxy_stage(index) then proxy_ok = false
         index = index - 1
     end while
+    manifest_ok = delete_active_proxy_manifest
+    // Removing the handoff is logged on the final owned server. The owned
+    // finalizer therefore runs after this deletion and remains the last move.
+    wait(FINALIZER_WAIT_SECONDS)
     reset_proxy_objects
     owned_ok = clean_all
-    if proxy_ok and owned_ok then
-        print(paint("Collapsed cleanly to the owned route.", COLOR_GREEN))
+    if proxy_ok and manifest_ok and owned_ok then
+        print(event_line("COLLAPSE COMPLETE", COLOR_GREEN, "owned route restored", COLOR_GREEN))
     else
-        print(paint("Collapsed to the owned route with explicit partial-cleanup warnings.", COLOR_ORANGE))
+        print(event_line("COLLAPSE PARTIAL", COLOR_ORANGE,
+            "owned route restored with cleanup warnings", COLOR_ORANGE))
     end if
     return owned_ok
 end function
@@ -784,22 +1070,40 @@ end function
 
 extend_proxy = function(requested)
     if globals.proxy_nodes.len > 0 then
-        print(paint("A proxy layer is already active. Type collapse first.", COLOR_RED))
+        print(event_line("PROXY EXTENSION REFUSED", COLOR_RED,
+            "active proxy layer must collapse first", COLOR_RED))
         return false
     end if
     if globals.shells.len < 2 then
-        print(paint("The owned route is not ready.", COLOR_RED))
+        print(event_line("PROXY EXTENSION REFUSED", COLOR_RED,
+            "owned route not ready", COLOR_RED))
+        return false
+    end if
+    // A previous interrupted run may have left a handoff behind. Remove it
+    // before selecting a new route, then cover that deletion on Server B.
+    if not delete_active_proxy_manifest(true) then
+        print(event_line("AUTODEPLOY HANDOFF", COLOR_RED,
+            "stale manifest retirement failed", COLOR_RED))
+        return false
+    end if
+    wait(FINALIZER_WAIT_SECONDS)
+    if not clean_stage(globals.shells.len - 1) then
+        print(event_line("PROXY EXTENSION REFUSED", COLOR_RED,
+            "final owned-server cleanup failed", COLOR_RED))
         return false
     end if
     available = load_autonet_nodes(globals.shells[-1])
     if available.len == 0 then
-        print(paint("No verified AutoNet nodes are available on the final owned server.", COLOR_RED))
+        print(event_line("PROXY EXTENSION REFUSED", COLOR_RED,
+            "no verified AutoNet nodes available", COLOR_RED))
         return false
     end if
     count = requested
     if count > available.len then
-        print(paint("Requested " + count + " proxy hops; using all " + available.len +
-            " available nodes.", COLOR_ORANGE))
+        print(event_line("PROXY COUNT REDUCED", COLOR_ORANGE,
+            "available pool is smaller than requested", COLOR_ORANGE))
+        print(event_branch("REQUESTED", COLOR_PINK, count, COLOR_PINK) +
+            "  " + paint("AVAILABLE", COLOR_PINK) + "  " + paint(available.len, COLOR_PINK))
         count = available.len
     end if
     selected = select_proxy_nodes(available, count)
@@ -809,17 +1113,19 @@ extend_proxy = function(requested)
     previous_shell = globals.shells[-1]
     previous_helper = globals.proxy_seed_helper_path
 
-    print(paint("Extending beyond the owned route", COLOR_PURPLE) + "  hops=" +
-        paint(selected.len, COLOR_GREEN))
+    route_heading("EXTENDING PROXY LAYER", selected.len + " HOPS")
     for node in selected
-        print(paint("Connecting proxy ", COLOR_PURPLE) +
-            paint((globals.proxy_nodes.len + 1) + "/" + selected.len, COLOR_PINK) + "  " +
-            paint(node.ip + ":" + node.port, COLOR_CYAN))
+        print(paint("◆ CONNECT ", COLOR_PURPLE) +
+            paint("[" + (globals.proxy_nodes.len + 1) + "/" + selected.len + "]", COLOR_PINK) +
+            "  " + paint("proxy route", COLOR_PURPLE))
+        print(event_branch("ENDPOINT", COLOR_CYAN, node.ip + ":" + node.port, COLOR_CYAN) +
+            "  " + paint("AUTHORITY", COLOR_PINK) + "  " + paint(node.user, COLOR_PINK))
         connected = previous_shell.connect_service(node.ip, node.port, node.user,
             node.password, "ssh")
         if not proxy_shell_valid(connected, node) then
-            print(paint("Reusable root SSH failed for " + node.ip + ".", COLOR_RED))
-            print(paint("The failed candidate may retain connection evidence.", COLOR_ORANGE))
+            print(event_line("CONNECTION FAILED", COLOR_RED, node.ip + ":" + node.port, COLOR_CYAN))
+            print(event_branch("RESIDUAL RISK", COLOR_RED,
+                "failed candidate may retain connection evidence", COLOR_RED))
             remove_proxy_seed_helper
             collapse_proxy
             return false
@@ -832,7 +1138,8 @@ extend_proxy = function(requested)
             delete_remote_helper(connected, helper_path)
             connected = null
             wait(FINALIZER_WAIT_SECONDS)
-            print(paint("Proxy computer cleanup source unavailable; extension stopped.", COLOR_RED))
+            print(event_line("PROXY EXTENSION REFUSED", COLOR_RED,
+                "computer cleanup source unavailable", COLOR_RED))
             remove_proxy_seed_helper
             collapse_proxy
             return false
@@ -843,6 +1150,8 @@ extend_proxy = function(requested)
         globals.proxy_computer_sources.push(computer_source)
         globals.proxy_router_sources.push(router_source)
         globals.proxy_helper_paths.push(helper_path)
+        print(paint("  ╰ ACCESS RETAINED", COLOR_GREEN) + "  " +
+            paint("shell", COLOR_CYAN) + "  authority=" + paint(node.user, COLOR_PINK))
 
         previous_index = globals.proxy_nodes.len - 2
         if previous_index < 0 then
@@ -864,8 +1173,22 @@ extend_proxy = function(requested)
     remove_proxy_seed_helper
     wait(FINALIZER_WAIT_SECONDS)
     clean_proxy_stage(last)
-    print(paint("Proxy route ready.", COLOR_GREEN) + "  active-hops=" +
-        paint(globals.proxy_nodes.len, COLOR_CYAN))
+    if not write_active_proxy_manifest then
+        print(event_line("AUTODEPLOY HANDOFF", COLOR_RED,
+            "publication failed; collapsing proxy layer", COLOR_RED))
+        collapse_proxy
+        return false
+    end if
+    // Publication changes files on Server B, so cover that write before the
+    // route is advertised as ready. AutoDeploy may now read the stable file.
+    wait(FINALIZER_WAIT_SECONDS)
+    if not clean_stage(globals.shells.len - 1) then
+        print(event_line("AUTODEPLOY HANDOFF", COLOR_ORANGE,
+            "ready with incomplete final owned-server cleanup", COLOR_ORANGE))
+    end if
+    print(event_line("PROXY ROUTE READY", COLOR_GREEN,
+        globals.proxy_nodes.len + " active hops", COLOR_GREEN))
+    print(event_branch("CURRENT", COLOR_PINK, current_endpoint_identity, COLOR_CYAN))
     open_final_terminal
     return true
 end function
@@ -881,15 +1204,17 @@ clean_stage = function(index)
     router_color = COLOR_RED
     if computer_ok then computer_color = COLOR_GREEN
     if router_ok then router_color = COLOR_GREEN
-    print("  " + paint(label, COLOR_CYAN) + "  computer=" +
-        paint(["FAIL", "clean"][computer_ok], computer_color) + "  router=" +
+    print(event_line("CLEANUP", COLOR_ORANGE, label, COLOR_CYAN))
+    print(event_branch("COMPUTER", COLOR_ORANGE,
+        ["FAIL", "clean"][computer_ok], computer_color) +
+        "  " + paint("ROUTER", COLOR_ORANGE) + "  " +
         paint(["FAIL", "clean"][router_ok], router_color))
     return computer_ok and router_ok
 end function
 
 
 clean_all = function()
-    print(paint("Route cleanup", COLOR_ORANGE))
+    route_heading("OWNED-ROUTE CLEANUP", globals.shells.len + " STAGES")
     all_ok = true
     index = globals.shells.len - 1
     while index >= 0
@@ -897,9 +1222,10 @@ clean_all = function()
         index = index - 1
     end while
     if all_ok then
-        print(paint("Owned route logs replaced.", COLOR_GREEN))
+        print(event_line("OWNED ROUTE CLEAN", COLOR_GREEN, "all logs replaced", COLOR_GREEN))
     else
-        print(paint("Cleanup was partial. Any FAIL surface still needs attention.", COLOR_RED))
+        print(event_line("OWNED CLEANUP PARTIAL", COLOR_RED,
+            "FAIL surfaces require attention", COLOR_RED))
     end if
     return all_ok
 end function
@@ -912,6 +1238,61 @@ clean_everything = function()
 end function
 
 
+show_banner = function()
+    print("          " + paint("◆", COLOR_PINK) + "                 " + paint("◆", COLOR_CYAN))
+    print("          " + paint("│", COLOR_PURPLE) + "                 " + paint("│", COLOR_CYAN))
+    print(paint("◆─────────", COLOR_PURPLE) + paint("┴", COLOR_PINK) +
+        paint("────────", COLOR_PURPLE) + paint("┬", COLOR_GREEN) +
+        paint("──────────────────◆", COLOR_CYAN))
+    print(paint("╰────────────", COLOR_PURPLE) + paint("[ AUTOROUTE ]", COLOR_PINK) +
+        paint("────────────╯", COLOR_PURPLE))
+    print("            " + paint("╰──────", COLOR_PURPLE) + paint("◆", COLOR_GREEN) +
+        paint("──────╯", COLOR_CYAN))
+    print("          " + paint("OWNED", COLOR_CYAN) + "  " +
+        paint("ROUTE", COLOR_GREEN) + "  " + paint("PROXY", COLOR_PINK))
+    print("       " + paint("ROWAN CIRCUIT // ", COLOR_PURPLE) +
+        paint(SCRIPT_VERSION, COLOR_CYAN))
+end function
+
+
+route_origin_identity = function()
+    if not is_computer(globals.local_computer) then return "unknown"
+    return globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+end function
+
+
+owned_endpoint_identity = function()
+    if globals.hops.len == 0 then return route_origin_identity
+    return globals.hops[-1].ip
+end function
+
+
+current_endpoint_identity = function()
+    if globals.proxy_nodes.len > 0 then return globals.proxy_nodes[-1].ip
+    return owned_endpoint_identity
+end function
+
+
+console_prompt = function()
+    handoff = "EMPTY"
+    handoff_color = COLOR_ORANGE
+    if globals.proxy_manifest_active then
+        handoff = "HANDOFF READY"
+        handoff_color = COLOR_GREEN
+    end if
+    print(paint("╭─◆ AUTOROUTE ◆─", COLOR_PURPLE) +
+        paint("[OWNED ", COLOR_CYAN) + paint(globals.hops.len, COLOR_PINK) +
+        paint("]", COLOR_CYAN) + "─" +
+        paint("[PROXY ", COLOR_PINK) + paint(globals.proxy_nodes.len, COLOR_PINK) +
+        paint("]", COLOR_PINK) + "─" +
+        paint("[" + handoff + "]", handoff_color))
+    return paint("╰─ORIGIN ", COLOR_ORANGE) + paint(route_origin_identity, COLOR_CYAN) +
+        paint(" ─▶ OWNED ", COLOR_GREEN) + paint(owned_endpoint_identity, COLOR_CYAN) +
+        paint(" ─▶ CURRENT ", COLOR_PINK) + paint(current_endpoint_identity, COLOR_CYAN) +
+        paint(" ─▶ ", COLOR_GREEN)
+end function
+
+
 open_final_terminal = function()
     if globals.shells.len < 2 then return false
     shell = globals.shells[-1]
@@ -920,11 +1301,13 @@ open_final_terminal = function()
     terminal = computer.File("/usr/bin/Terminal.exe")
     if not is_file(terminal) then terminal = computer.File("/bin/Terminal.exe")
     if not is_file(terminal) then
-        print(paint("Terminal.exe was not found on the current route endpoint.", COLOR_RED))
+        print(event_line("TERMINAL REFUSED", COLOR_RED,
+            "Terminal.exe missing on current endpoint", COLOR_RED))
         return false
     end if
     shell.launch(terminal.path)
-    print(paint("Current-route terminal requested.", COLOR_GREEN))
+    print(event_line("TERMINAL REQUESTED", COLOR_GREEN,
+        current_endpoint_identity, COLOR_CYAN))
     return true
 end function
 
@@ -950,11 +1333,17 @@ build_route = function()
     previous_helper = program_path
     number = 0
     for hop in globals.hops
-        print(paint("Connecting ", COLOR_PURPLE) + paint(hop.alias, COLOR_GREEN) + "  " +
-            paint(hop.user + "@" + hop.ip + ":" + hop.port, COLOR_CYAN))
+        print(paint("◆ CONNECT ", COLOR_PURPLE) +
+            paint("[" + (number + 1) + "/" + globals.hops.len + "]", COLOR_PINK) +
+            "  " + paint("owned route", COLOR_PURPLE))
+        print(event_branch("ALIAS", COLOR_PINK, hop.alias, COLOR_PINK) +
+            "  " + paint("ENDPOINT", COLOR_CYAN) + "  " +
+            paint(hop.ip + ":" + hop.port, COLOR_CYAN))
+        print(event_branch("AUTHORITY", COLOR_PINK, hop.user, COLOR_PINK))
         connected = previous_shell.connect_service(hop.ip, hop.port, hop.user, hop.password, "ssh")
         if not is_shell(connected) then
-            print(paint("SSH connection failed at " + hop.alias + ".", COLOR_RED))
+            print(event_line("CONNECTION FAILED", COLOR_RED, hop.alias, COLOR_PINK))
+            print(event_branch("ENDPOINT", COLOR_CYAN, hop.ip + ":" + hop.port, COLOR_CYAN))
             clean_all
             return false
         end if
@@ -964,6 +1353,8 @@ build_route = function()
         globals.shells.push(connected)
         globals.router_sources.push(router_source)
         globals.helper_paths.push(helper_path)
+        print(paint("  ╰ ACCESS RETAINED", COLOR_GREEN) + "  " +
+            paint("shell", COLOR_CYAN) + "  authority=" + paint(hop.user, COLOR_PINK))
 
         // Once the next hop exists, the previous computer and router are no
         // longer needed for route construction. Replace their logs immediately.
@@ -974,15 +1365,19 @@ build_route = function()
     end for
 
     clean_stage(globals.shells.len - 1)
-    print(paint("Route ready.", COLOR_GREEN))
+    print(event_line("OWNED ROUTE READY", COLOR_GREEN,
+        globals.hops.len + " hops", COLOR_GREEN))
+    print(event_branch("CURRENT", COLOR_PINK, current_endpoint_identity, COLOR_CYAN))
     return true
 end function
 
 
 show_status = function()
-    print(paint("Owned route", COLOR_PURPLE))
+    route_heading("AUTOROUTE STATUS", "LIVE ROUTE")
+    print(event_line("ORIGIN", COLOR_ORANGE, route_origin_identity, COLOR_CYAN))
+    print(event_branch("CURRENT", COLOR_PINK, current_endpoint_identity, COLOR_CYAN))
     show_route(globals.hops)
-    print(paint("Owned shells: ", COLOR_PURPLE) + globals.shells.len)
+    print(event_line("OWNED SHELLS", COLOR_GREEN, globals.shells.len, COLOR_PINK))
     index = 0
     while index < globals.shells.len
         label = "home"
@@ -991,11 +1386,12 @@ show_status = function()
         if index < globals.router_sources.len and is_file(globals.router_sources[index]) then router_state = "ready"
         color = COLOR_RED
         if router_state == "ready" then color = COLOR_GREEN
-        print("  " + paint(label, COLOR_CYAN) + "  router-clean=" + paint(router_state, color))
+        print(event_branch("ROUTER CLEAN SOURCE", COLOR_ORANGE, label, COLOR_CYAN) +
+            "  " + paint("STATE", COLOR_DIM) + "  " + paint(router_state, color))
         index = index + 1
     end while
-    print(paint("Proxy layer", COLOR_PURPLE) + "  active-hops=" +
-        paint(globals.proxy_nodes.len, COLOR_CYAN))
+    print(event_line("PROXY LAYER", COLOR_PURPLE,
+        globals.proxy_nodes.len + " active hops", COLOR_PINK))
     index = 0
     while index < globals.proxy_nodes.len
         node = globals.proxy_nodes[index]
@@ -1009,26 +1405,64 @@ show_status = function()
         router_color = COLOR_ORANGE
         if computer_state == "ready" then computer_color = COLOR_GREEN
         if router_state == "ready" then router_color = COLOR_GREEN
-        print("  " + paint((index + 1) + " " + node.ip + ":" + node.port, COLOR_CYAN) +
-            "  computer-clean=" + paint(computer_state, computer_color) +
-            "  router-clean=" + paint(router_state, router_color))
+        print(paint("◆ PROXY ", COLOR_PURPLE) + paint("[" + (index + 1) + "]", COLOR_PINK) +
+            "  " + paint(node.ip + ":" + node.port, COLOR_CYAN))
+        print(event_branch("COMPUTER CLEAN", COLOR_ORANGE, computer_state, computer_color) +
+            "  " + paint("ROUTER CLEAN", COLOR_ORANGE) + "  " +
+            paint(router_state, router_color))
         index = index + 1
     end while
+    handoff_state = "empty"
+    handoff_color = COLOR_ORANGE
+    if globals.proxy_manifest_active then
+        handoff_state = "ready"
+        handoff_color = COLOR_GREEN
+    end if
+    print(event_line("AUTODEPLOY HANDOFF", COLOR_PURPLE, handoff_state, handoff_color))
+    print(event_branch("NODES", COLOR_PINK, globals.proxy_manifest_count, COLOR_PINK) +
+        "  " + paint("ENDPOINT", COLOR_CYAN) + "  " +
+        paint(globals.proxy_manifest_endpoint, COLOR_CYAN))
+    print(event_branch("MANIFEST", COLOR_ORANGE, ACTIVE_PROXY_ROUTE_PATH, COLOR_ORANGE))
+    print(event_branch("CREDENTIALS", COLOR_PINK,
+        ["absent", "masked"][globals.proxy_manifest_active], COLOR_PINK))
 end function
 
 
 show_help = function()
-    print(paint("AutoRoute commands", COLOR_PURPLE))
-    print("  " + paint("nodes", COLOR_CYAN) + "                 list verified AutoNet proxy nodes")
-    print("  " + paint("extend [count]", COLOR_GREEN) + "        add 1-" + MAX_PROXY_HOPS +
-        " random proxy hops (default " + DEFAULT_PROXY_HOPS + ")")
-    print("  " + paint("collapse", COLOR_ORANGE) + "              clean proxy hops and return to owned route")
-    print("  " + paint("clean / clog / logs", COLOR_GREEN) + "  replace logs across every active layer")
-    print("  " + paint("open", COLOR_CYAN) + "                  open another current-route terminal")
-    print("  " + paint("status", COLOR_CYAN) + "                show route and cleaner readiness")
-    print("  " + paint("rebuild", COLOR_ORANGE) + "               collapse, clean, and reconnect owned route")
-    print("  " + paint("setup", COLOR_ORANGE) + "                 collapse and replace saved owned route")
-    print("  " + paint("quit", COLOR_RED) + "                  final cleanup and exit")
+    print("")
+    print(paint("AutoRoute ", COLOR_PURPLE) + paint(SCRIPT_VERSION, COLOR_CYAN) +
+        paint(" — owned route, proxy extension, and AutoDeploy handoff", COLOR_DIM))
+    print(paint("Build the trusted SSH route once, then extend through verified AutoNet nodes.", COLOR_DIM))
+    print(paint("Collapse in reverse order when the temporary proxy layer is finished.", COLOR_DIM))
+    print("")
+    print(paint("Commands", COLOR_PURPLE))
+    print("  " + paint("nodes", COLOR_CYAN) +
+        paint("                 list verified AutoNet proxy nodes", COLOR_DIM))
+    print("  " + paint("extend", COLOR_PURPLE) + " " + paint("[count]", COLOR_PINK) +
+        paint("        add 1-" + MAX_PROXY_HOPS + " proxy hops and publish the handoff", COLOR_DIM))
+    print("  " + paint("collapse", COLOR_ORANGE) +
+        paint("              retire the handoff, clean proxies, and return owned", COLOR_DIM))
+    print("  " + paint("clean / clog / logs", COLOR_ORANGE) +
+        paint("  replace logs across every active layer", COLOR_DIM))
+    print("  " + paint("open", COLOR_CYAN) +
+        paint("                  open another current-route terminal", COLOR_DIM))
+    print("  " + paint("status", COLOR_CYAN) +
+        paint("                show route, handoff, and cleaner readiness", COLOR_DIM))
+    print("  " + paint("rebuild", COLOR_ORANGE) +
+        paint("               collapse, clean, and reconnect the owned route", COLOR_DIM))
+    print("  " + paint("setup", COLOR_ORANGE) +
+        paint("                 collapse and replace the saved owned route", COLOR_DIM))
+    print("  " + paint("help", COLOR_PURPLE) +
+        paint("                  show this guide", COLOR_DIM))
+    print("  " + paint("quit", COLOR_RED) +
+        paint("                  final cleanup and exit", COLOR_DIM))
+    print("")
+    print(event_line("OWNED ROUTE", COLOR_PURPLE, OWNED_ROUTE_PATH, COLOR_ORANGE))
+    print(event_line("AUTONET NODES", COLOR_CYAN, AUTONET_NODE_ROOT, COLOR_ORANGE))
+    print(event_line("AUTODEPLOY HANDOFF", COLOR_GREEN,
+        ACTIVE_PROXY_ROUTE_PATH, COLOR_ORANGE))
+    print(event_branch("CREDENTIALS", COLOR_PINK,
+        "masked in terminal output", COLOR_PINK))
 end function
 
 
@@ -1041,22 +1475,25 @@ globals.local_shell = get_shell
 globals.local_computer = globals.local_shell.host_computer
 globals.hops = []
 globals.last_router_shell = null
+globals.visual_attack_index = 0
 reset_route_objects
 reset_proxy_objects
 
-print(paint("AutoRoute " + SCRIPT_VERSION, COLOR_PURPLE))
-if not ensure_network_layout then exit("Could not create /root/autoscripts/network.")
+show_banner
+entered_pin = user_input(route_pin_signature, 1)
+if PIN != "" and entered_pin != PIN then exit(fatal_line("Incorrect PIN."))
+show_help
+if not ensure_network_layout then exit(fatal_line("Could not create /root/autoscripts/network."))
 if params.len > 0 and params[0].lower == "setup" then globals.hops = setup_route else globals.hops = load_route
 if typeof(globals.hops).lower != "list" then globals.hops = setup_route
-if typeof(globals.hops).lower != "list" then exit("Route setup was not completed.")
+if typeof(globals.hops).lower != "list" then exit(fatal_line("Route setup was not completed."))
 show_route(globals.hops)
 
-if not build_route then exit("AutoRoute could not build the saved route.")
+if not build_route then exit(fatal_line("AutoRoute could not build the saved route."))
 open_final_terminal
-show_help
 
 while true
-    raw_command = user_input(paint("autoroute", COLOR_PURPLE) + "> ").trim.lower
+    raw_command = user_input(console_prompt).trim.lower
     words = []
     for word in raw_command.split(" ")
         if word.trim != "" then words.push(word.trim)
@@ -1071,13 +1508,15 @@ while true
         requested = DEFAULT_PROXY_HOPS
         if words.len > 1 then
             if not digits_only(words[1]) then
-                print(paint("Usage: extend [1-" + MAX_PROXY_HOPS + "]", COLOR_RED))
+                print(event_line("USAGE", COLOR_RED,
+                    "extend [1-" + MAX_PROXY_HOPS + "]", COLOR_ORANGE))
                 continue
             end if
             requested = words[1].to_int
         end if
         if requested < 1 or requested > MAX_PROXY_HOPS then
-            print(paint("Proxy hop count must be between 1 and " + MAX_PROXY_HOPS + ".", COLOR_RED))
+            print(event_line("PROXY COUNT REFUSED", COLOR_RED,
+                "expected 1-" + MAX_PROXY_HOPS, COLOR_RED))
         else
             extend_proxy(requested)
         end if
@@ -1101,9 +1540,10 @@ while true
         show_help
     else if command == "quit" or command == "exit" or command == "q" then
         collapse_proxy
-        print(paint("AutoRoute closed.", COLOR_PURPLE))
+        print(event_line("AUTOROUTE CLOSED", COLOR_PURPLE,
+            "owned route cleanup complete", COLOR_GREEN))
         exit
     else if command != "" then
-        print(paint("Unknown command. Type help.", COLOR_RED))
+        print(event_line("UNKNOWN COMMAND", COLOR_RED, "type help", COLOR_ORANGE))
     end if
 end while

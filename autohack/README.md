@@ -1,68 +1,60 @@
-# AutoHack 2.5.0
+# AutoHack
 
-AutoHack is the Auto Family's persistent general-purpose access console. It attacks public services or an exact LAN target, retains useful access instead of immediately opening a terminal, returns to its own console after a target shell closes, and keeps the execution origin and selected target visible in its Rowan circuit prompt.
+AutoHack is the Auto Family's targeted access tool for Grey Hack Public v0.9.6773. Give it a public IP and, optionally, an exact port and expected LAN IP. It maps visible services, consults the shared ACVDB3 vulnerability database before scanning, ranks known exploits, recovers and reuses root credentials without printing them, and retains the strongest usable target shell in an indexed session list.
 
-This release combines shared ACVDB3 reuse, exact-LAN scans without a required port, router control-plane targeting on port `0`, retained sessions, deliberate shell entry, non-stock file discovery, embedded deep Nmap reconnaissance, poison-library promotion, target cleanup, destructive blackout, and local hardening.
-
-## Source files
-
-- [`autohack-2.5.0.src`](autohack-2.5.0.src) — compact source intended for Grey Hack's 160,000-character CodeEditor limit.
-- [`autohack-2.5.0-readable.src`](autohack-2.5.0-readable.src) — canonical formatted source for review and maintenance; it is too large to save directly in the current CodeEditor.
-
-Both files print and report version `2.5.0`.
+Current packaged version: `3.0.0`. It is the clean-rebuild successor to the older public `2.5.0` line, preserves the complete `0.1.0-dev15` engine and personality, and applies the locked Auto Family presentation standard. No attack method, cleanup path, retained-session feature, inventory behavior, PoisonLib promotion, Blackout gate, fortification gate, or embedded Nmap capability was removed or reduced.
 
 ## Install
 
-Compile the compact source as `/bin/autohack`. The execution machine requires:
+Set a private `PIN` in `autohack-3.0.0.src`, then compile that compact source as `/bin/autohack`. The separate `autohack-3.0.0-readable.src` is provided for source review but exceeds CodeEditor's character limit and is not the compile target.
 
-```text
-/lib/metaxploit.so
-/lib/crypto.so
-```
+Successful access does not unexpectedly replace the AutoHack console. Use `shell` to open the newest result or `shell <index>` to choose another retained target. When the target terminal is closed, AutoHack resumes and replaces the retained target-computer, target-router when available, execution-server, and execution-router logs. Target-computer and owned execution-route cleanup are mandatory; unavailable target-router cleanup is reported honestly as best effort.
 
-Optional weak libraries are discovered beneath `/root/PoisonLibs/`.
+Use `interesting` to inventory non-stock files on the newest retained target, or `interesting <index>` for a selected session. It is designed for finding player tools, GreyScript source, chat/mail artifacts, pictures, PDFs, logs, documents, and unusual data without dumping the whole operating-system tree. The command prints paths and metadata only; it does not read contents or download anything.
 
-## Console commands
+## Commands
 
-```text
-<ip> [port] [lan-ip]          attack all services or one exact port
-target <ip> [port] [lan-ip]   explicit form of the same command
-nmap <ip|host> [--quick]      embedded deep topology reconnaissance
-sessions                      list retained verified access
-where | whoami                show execution origin and selected target
-shell [index]                 open retained access and return here on exit
-interesting [index]           list non-stock files without reading contents
-autoshell [on|off]            control automatic shell entry
-poison [status|list|on|off]   inspect or control weak-library promotion
-nuke [index]                  destroy one retained root target after confirmation
-harden [home|server]          root-lock the execution host with home safeguards
-forget [index|all]            release retained access objects
-status                        show storage and ACVDB readiness
-help                          show the command guide
-quit                          clean the execution route and leave AutoHack
-```
+- `autohack <ip> [port] [lan-ip]` — attack one target, then remain at the AutoHack console.
+- `<ip> [port] [lan-ip]` — attack another target from the persistent `autohack>` console.
+- `target <ip> [port] [lan-ip]` — explicit console form of the same command.
+- `nmap <ip|host> [--quick]` — run the embedded read-only Synthwave Deep Recon engine.
+- `sessions` — list up to 12 retained verified access sessions.
+- `where` / `whoami` — show execution origin and selected target.
+- `shell [index]` — open the newest or selected retained session; terminal `exit` returns to AutoHack and runs finalization.
+- `interesting [index]` — list visible non-stock files on the newest or selected session, then finalize logs and return to AutoHack.
+- `autoshell [on|off]` — inspect or change automatic terminal entry; the default is off.
+- `poison [status|list|on|off]` — inspect or control exact-name weak-library promotion.
+- `nuke [index]` — run the separately confirmed Blackout payload against one retained root target.
+- `harden home|server` — run separately confirmed local fortification.
+- `forget [index|all]` — release retained shell objects from the current AutoHack run.
+- `status` — show storage and shared VDB readiness.
+- `help` — show the concise command guide.
+- `quit` — leave AutoHack and return to the original terminal.
 
-`<public-ip> <lan-ip>` scans every visible service mapped to that exact LAN machine. `<public-ip> 0 <router-lan-ip>` explicitly targets the router control plane.
+## Auto Family role
 
-## Runtime data
+AutoRoute supplies the trusted owned chain and temporary proxy path. AutoRecon fills missing exact-version exploit knowledge. AutoNet recruits reusable SSH nodes. AutoDeploy will stage and remove temporary payloads. AutoHack consumes those shared capabilities to obtain one usable target session, then returns control to the route and cleanup lifecycle.
 
-```text
-/root/autoscripts/autohack/logs/
-/root/vulndb/
-/root/PoisonLibs/
-```
+## Auto Family interface
 
-The public source contains no personal route credentials. `af2026` is an in-game password replacement convention, not an account secret.
+`3.0.0` keeps AutoHack's accepted circuit, full help, left-to-right origin/target prompt, and detailed console. The user-facing console now requires a masked activation PIN. Attack attempts and results use the exact AutoAcademic grammar, while AHLOG records are split into semantic two-field branches: hosts, ports, libraries, and technical objects are cyan; identities and authority are pink; successful state is green; failures are red; cleanup and operator attention are orange; vulnerability actions remain purple; AHLOG badges are dim violet.
 
-## Release notes
+Both public sources intentionally ship with `PIN = ""`; configure the compact compile target before use or AutoHack remains locked. AutoHack's internally copied `--router-clean-helper` is the one deliberate PIN exception because an interactive prompt inside that unattended helper would break target-router cleanup.
 
-### 2.5.0
+## Runtime contract
 
-- Promoted AutoHack from an access experiment into the Auto Family's mature persistent hacking console.
-- Added all-service exact-LAN targeting, router port `0`, retained sessions, deliberate shell entry, return-to-console handoff, and visible origin/target state.
-- Integrated deep Nmap reconnaissance, ACVDB3 reuse, focused poison-library promotion, non-stock `interesting` inventory, Blackout target destruction, and home/server fortification.
-- Added color-coded attack instrumentation and the Rowan Circuit interface while retaining a CodeEditor-safe compact build and a matched readable source.
+- App state: `/root/autoscripts/autohack`
+- Diagnostics: `/root/autoscripts/autohack/logs/latest.txt`
+- Shared vulnerability database: `/root/vulndb`
+- Optional matching weak libraries: `/root/PoisonLibs`
+- Required local libraries: `/lib/metaxploit.so` and `/lib/crypto.so`
 
-## Runtime boundary
+Target-computer and owned execution-route cleanup remain mandatory. Target-router cleanup remains honestly best effort when the target library yields no cleanup-capable object. Successful access is retained without unexpectedly replacing the AutoHack console unless AutoShell is enabled.
 
-Exact-target attacks, retained-session return, embedded Nmap, blackout, hardening, and cleanup all have field evidence. Success still depends on the current service map and exploit objects exposed by each library; target-router cleanup remains best effort when no usable router object is returned.
+## Package status
+
+The personal compact build is 154,266 characters, leaving 5,734 beneath CodeEditor's 160,000-character limit. The public compact build is 154,251 characters. All readable and compact `3.0.0` artifacts pass the local direct-source parser and compatibility audit with zero findings. Ordinary in-game use is the acceptance authority; there is no staged testing sequence.
+
+The complete `3.0.0` presentation and ordinary attack lifecycle are field-observed and owner-accepted. The accepted run retained guest and root shells plus file and computer objects, handled numeric returns and rejected endpoints, recovered root access, preserved the native lavender attack narration, emitted the canonical semantic attack and AHLOG branches, completed target and execution cleanup, reported unavailable target-router cleanup honestly, and returned to the ready AutoHack console. Under `Trust Me`, this release is frozen until an encountered issue or an explicitly approved future capability requires another version.
+
+Transfer `get/put`, shared-PC/router password escalation, Nmap reduction, and other serious capability work are intentionally deferred to a future update. AutoHack will not sacrifice its existing personality, skill, or usefulness to force in a conditional method.

@@ -1,15 +1,25 @@
 //Made By Hobo & Rowan
-// AutoRecon 2.0.0 vulnerability coverage harvester and exact-library locator
-// for Grey Hack Public v0.9.6773.
+// AutoRecon 2.2.1 vulnerability coverage harvester and exact-library locator
+// for Grey Hack Public build 0_9_6773.
 //
 // AutoRecon reuses the shared ACVDB3 database, skips exact library versions
 // carrying a completed S receipt, fills partial or unknown versions, records
 // overflow result quality, and preserves remote discoveries in a sync outbox.
-// Dev7 preserves the field-proven locator and applies Chris's field-observed
-// Rowan Circuit connector alignment without changing locator behavior.
+// Dev2 adds host-aware authoritative/endpoint roles and direct Server B transport:
+// endpoint research stays in outbox, upload sends verified shards to the master
+// inbox, download refreshes the read-only coverage seed, and sync merges safely.
+// In auto mode, the configured database public IP identifies the master host.
+// Dev3 keeps those roles informational: upload and download remain available from
+// any configured host while preserving transport verification and outbox safety.
+// Dev4 validates downloaded coverage seeds structurally, reports the exact reason
+// a seed was rejected, and applies the Auto Family semantic palette to live attack,
+// permission, result, cleanup, and database activity.
+// Version 2.2.1 preserves the complete 2.2.0 engine and interface while repairing
+// field-observed color-tag leakage, ACLOG labels hijacked by secondary fields,
+// overlooked semantic values, and mixed server identity/network presentation.
 // Non-focused libraries may support cleanup but never mutate focused research.
 
-SCRIPT_VERSION = "2.0.0"
+SCRIPT_VERSION = "2.2.1"
 
 AUTOSCRIPTS_ROOT = "/root/autoscripts"
 APP_ROOT = "/root/autoscripts/autorecon"
@@ -48,6 +58,21 @@ CLEANUP_ONLY_MAX_OVERFLOWS = 12
 HELPER_WAIT_SECONDS = 60
 FINALIZER_WAIT_SECONDS = 2
 RECON_PASSWORD_INJECT = "af2026"
+PIN = ""
+
+// Shared database transport. Keep credentials blank in public releases.
+// Modes: auto, authoritative, endpoint, standalone.
+// - authoritative: this host owns /root/vulndb and accepts sync.
+// - endpoint: /root/vulndb is never mutated; research is written to outbox.
+// - auto: configured server IP matching this host => authoritative; another host
+//   => endpoint; no configured server => preserve standalone behavior.
+DATABASE_MODE = "auto"
+DATABASE_SERVER_IP = ""
+DATABASE_SERVER_SSH_PORT = 22
+DATABASE_SERVER_SSH_USER = "root"
+DATABASE_SERVER_SSH_PASSWORD = ""
+DATABASE_REMOTE_ROOT = "/root/autoscripts/autorecon"
+DATABASE_AUTO_DOWNLOAD = true
 
 COLOR_PURPLE = "#D86CFF"
 COLOR_CYAN = "#55E7FF"
@@ -55,6 +80,8 @@ COLOR_GREEN = "#63FF9B"
 COLOR_RED = "#FF5C7C"
 COLOR_ORANGE = "#FFB86B"
 COLOR_PINK = "#FF79C6"
+COLOR_LAVENDER = "#C7A7E8"
+COLOR_DIM = "#A79BC8"
 
 
 paint = function(value, color)
@@ -62,17 +89,61 @@ paint = function(value, color)
 end function
 
 
-show_auto_action = function(label, detail = "", color = COLOR_PURPLE)
-    line = paint("◆ " + label, color)
-    if detail != "" then line = line + "  " + paint(detail, COLOR_CYAN)
-    print(line)
+event_line = function(label, label_color, detail = "", detail_color = "")
+    if detail_color == "" then detail_color = COLOR_LAVENDER
+    line = paint("◆ " + label, label_color)
+    if detail != "" then line = line + "  " + paint(detail, detail_color)
+    return line
+end function
+
+
+event_branch = function(label, label_color, detail = "", detail_color = "")
+    if detail_color == "" then detail_color = COLOR_LAVENDER
+    line = paint("  ╰ " + label, label_color)
+    if detail != "" then line = line + "  " + paint(detail, detail_color)
+    return line
+end function
+
+
+show_auto_action = function(label, detail = "", label_color = "", detail_color = "")
+    if label_color == "" then label_color = COLOR_PURPLE
+    if detail_color == "" then detail_color = COLOR_CYAN
+    print(event_line(label, label_color, detail, detail_color))
+end function
+
+
+database_server_display = function()
+    return paint(DATABASE_SERVER_SSH_USER, COLOR_PINK) + paint("@", COLOR_DIM) +
+        paint(DATABASE_SERVER_IP + ":" + DATABASE_SERVER_SSH_PORT, COLOR_CYAN)
+end function
+
+
+show_database_action = function(action)
+    print(paint("◆ DATABASE " + action.upper, COLOR_ORANGE) + "  " +
+        database_server_display)
+end function
+
+
+fatal_line = function(message)
+    return paint("AUTORECON REFUSED", COLOR_RED) + " | " + paint(message, COLOR_ORANGE)
+end function
+
+
+recon_state_color = function(state)
+    lowered = state.lower
+    if lowered.indexOf("ready") != null or lowered.indexOf("master") != null or
+        lowered.indexOf("found") != null then return COLOR_GREEN
+    if lowered.indexOf("failed") != null or lowered.indexOf("refused") != null then return COLOR_RED
+    if lowered.indexOf("endpoint") != null or lowered.indexOf("wait") != null or
+        lowered.indexOf("login") != null then return COLOR_ORANGE
+    return COLOR_PINK
 end function
 
 
 show_banner = function()
-    print("             " + paint("◆", COLOR_PINK) + "       " + paint("◆", COLOR_CYAN))
-    print("             " + paint("│", COLOR_PURPLE) + "       " + paint("│", COLOR_PURPLE))
-    print("       " + paint("◆──────┴──╮", COLOR_PINK) + "" + paint("╭──┴──────────◆", COLOR_CYAN))
+    print("             " + paint("◆", COLOR_PINK) + "        " + paint("◆", COLOR_CYAN))
+    print("             " + paint("│", COLOR_PURPLE) + "        " + paint("│", COLOR_PURPLE))
+    print("      " + paint("◆──────┴──╮", COLOR_PINK) + "  " + paint("╭──┴─────────◆", COLOR_CYAN))
     print("      " + paint("│         ╰──", COLOR_PURPLE) + paint("◆", COLOR_GREEN) +
         paint("──╯         │", COLOR_PURPLE))
     print(paint("      │     ╭─────────────╮     │", COLOR_PURPLE))
@@ -81,7 +152,21 @@ show_banner = function()
     print(paint("            ╰──────┬──────╯", COLOR_PURPLE))
     print(paint("      ◆────────────", COLOR_CYAN) + paint("┴", COLOR_GREEN) +
         paint("────────────◆", COLOR_CYAN))
-    print("          " + paint("ROWAN CIRCUIT // " + SCRIPT_VERSION, COLOR_PURPLE))
+    print("          " + paint("ROWAN CIRCUIT // ", COLOR_PURPLE) +
+        paint(SCRIPT_VERSION, COLOR_CYAN))
+end function
+
+
+recon_pin_signature = function()
+    origin = "NO ORIGIN"
+    if is_computer(globals.local_computer) then
+        origin = globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+    end if
+    top = paint("╭─◆ AUTORECON ◆─", COLOR_PURPLE) + paint("[PIN REQUIRED]", COLOR_ORANGE)
+    bottom = paint("╰─", COLOR_PURPLE) + paint("ORIGIN ", COLOR_ORANGE) +
+        paint(origin, COLOR_CYAN) + paint(" ─▶ ", COLOR_GREEN) +
+        paint("ENTER PIN", COLOR_PINK) + paint(" ─▶ ", COLOR_GREEN)
+    return top + char(10) + bottom
 end function
 
 
@@ -161,8 +246,66 @@ digits_only = function(value)
 end function
 
 
+valid_ip_address = function(value)
+    parts = str(value).trim.split("[.]")
+    if parts.len != 4 then return false
+    for part in parts
+        if not digits_only(part) then return false
+        number = part.to_int
+        if typeof(number).lower != "number" or number < 0 or number > 255 then return false
+    end for
+    return true
+end function
+
+
+database_configured = function()
+    if not valid_ip_address(DATABASE_SERVER_IP) then return false
+    if typeof(DATABASE_SERVER_SSH_PORT).lower != "number" then return false
+    if DATABASE_SERVER_SSH_PORT < 0 or DATABASE_SERVER_SSH_PORT > 65535 then return false
+    return DATABASE_SERVER_SSH_USER.trim != ""
+end function
+
+
+resolve_database_role = function()
+    mode = DATABASE_MODE.lower.trim
+    if mode == "authoritative" or mode == "endpoint" or mode == "standalone" then return mode
+    if mode != "auto" then
+        print(event_line("DATABASE MODE", COLOR_ORANGE,
+            "unknown value; using auto role selection", COLOR_ORANGE))
+    end if
+    if database_configured then
+        local_public_ip = str(globals.local_computer.public_ip).trim
+        if local_public_ip == DATABASE_SERVER_IP.trim then return "authoritative"
+        return "endpoint"
+    end if
+    return "standalone"
+end function
+
+
 ensure_folder_path = function(path)
     computer = globals.local_computer
+    current = "/"
+    for part in path.split("/")
+        part = part.trim
+        if part == "" then continue
+        next_path = join_path(current, part)
+        item = computer.File(next_path)
+        if is_file(item) then
+            if not item.is_folder then return null
+        else
+            if computer.create_folder(current, part) != 1 then return null
+            item = computer.File(next_path)
+            if not is_file(item) or not item.is_folder then return null
+        end if
+        current = next_path
+    end for
+    return computer.File(path)
+end function
+
+
+ensure_remote_folder_path = function(remote_shell, path)
+    if not is_shell(remote_shell) then return null
+    computer = remote_shell.host_computer
     current = "/"
     for part in path.split("/")
         part = part.trim
@@ -213,20 +356,238 @@ init_layout = function()
 end function
 
 
-terminal_diag = function(message, line)
-    lowered = message.lower
-    if lowered.indexOf("fail") != null or lowered.indexOf("risk") != null or
-        lowered.indexOf("unavailable") != null then return paint(line, COLOR_RED)
-    if lowered.indexOf("clean") != null or lowered.indexOf("outbox") != null or
-        lowered.indexOf("import") != null then return paint(line, COLOR_ORANGE)
-    if lowered.indexOf("vuln") != null or lowered.indexOf("scan") != null or
-        lowered.indexOf("coverage") != null then return paint(line, COLOR_PURPLE)
-    if lowered.indexOf("complete") != null or lowered.indexOf("success") != null then
-        return paint(line, COLOR_GREEN)
+semantic_diag_color = function(key, value, context)
+    key_lower = key.lower
+    value_lower = value.lower
+    context_lower = context.lower
+
+    if value_lower.indexOf("failed") != null or value_lower.indexOf("rejected") != null or
+        value_lower.indexOf("refused") != null or value_lower.indexOf("unavailable") != null or
+        value_lower.indexOf("denied") != null or value_lower.indexOf("invalid") != null or
+        value_lower.indexOf("exhausted") != null or value_lower.indexOf("incomplete") != null or
+        value_lower.indexOf("not_found") != null or
+        value_lower.indexOf("no access") != null or value_lower.indexOf("no_access") != null then
+        return COLOR_RED
     end if
-    if lowered.indexOf("host") != null or lowered.indexOf("target") != null or
-        lowered.indexOf("service") != null then return paint(line, COLOR_CYAN)
-    return line
+    if key_lower == "authoritative" then
+        if value_lower == "true" or value_lower == "1" or value_lower == "yes" then return COLOR_GREEN
+        return COLOR_ORANGE
+    end if
+    if key_lower == "execution" then
+        if value_lower == "true" or value_lower == "1" or value_lower == "yes" then return COLOR_GREEN
+        return COLOR_RED
+    end if
+    if key_lower == "verified" then
+        if context_lower.indexOf("incomplete") != null or context_lower.indexOf("failed") != null then
+            return COLOR_RED
+        end if
+        return COLOR_GREEN
+    end if
+    if key_lower == "restored" then return COLOR_GREEN
+    if key_lower == "state" and value_lower == "missing" then return COLOR_ORANGE
+    if key_lower.indexOf("residual") != null or key_lower == "risk" then
+        if value_lower == "true" or value_lower == "1" or value_lower == "yes" then return COLOR_RED
+        return COLOR_GREEN
+    end if
+    if key_lower == "computer" or key_lower == "router" or
+        key_lower.indexOf("cleanup") != null then
+        if value_lower == "true" or value_lower == "1" or value_lower == "yes" or
+            value_lower == "clean" or value_lower == "complete" then return COLOR_GREEN
+        if value_lower == "false" or value_lower == "0" or value_lower == "no" then return COLOR_RED
+    end if
+    if value_lower == "yes" or value_lower == "true" or value_lower == "success" or
+        value_lower == "ready" or value_lower == "complete" or value_lower == "completed" or
+        value_lower == "accepted" or value_lower == "retained" or value_lower == "observed" or
+        value_lower == "saved" or value_lower == "copied" or value_lower == "staged" or
+        value_lower == "clean" or value_lower == "verified" or value_lower == "refreshed" or
+        value_lower == "merged" then return COLOR_GREEN
+    if value_lower == "no" or value_lower == "false" or value_lower == "unknown" or
+        value_lower == "missing" or
+        value_lower == "skipped" or value_lower == "cancelled" or
+        value_lower == "known-only" then return COLOR_ORANGE
+
+    if key_lower == "bucket" then return COLOR_CYAN
+    if key_lower.indexOf("authority") != null or key_lower.indexOf("user") != null or
+        key_lower.indexOf("account") != null or key_lower.indexOf("credential") != null or
+        key_lower.indexOf("index") != null or key_lower.indexOf("attempt") != null or
+        key_lower.indexOf("count") != null or key_lower.indexOf("entries") != null or
+        key_lower.indexOf("files") != null or key_lower.indexOf("shards") != null or
+        key_lower.indexOf("versions") != null or key_lower.indexOf("fingerprint") != null or
+        key_lower.indexOf("buckets") != null or key_lower.indexOf("record") != null or
+        key_lower == "added" or key_lower == "remaining" or
+        key_lower == "service_net_use" or key_lower == "seed" or
+        key_lower == "outbox" then return COLOR_PINK
+
+    if key_lower.indexOf("network") != null or key_lower.indexOf("host") != null or
+        key_lower.indexOf("endpoint") != null or key_lower.indexOf("router") != null or
+        key_lower.indexOf("ip") != null or key_lower.indexOf("port") != null or
+        key_lower.indexOf("library") != null or key_lower == "lib" or
+        key_lower.indexOf("version") != null or key_lower.indexOf("service") != null or
+        key_lower == "type" or key_lower == "kind" then return COLOR_CYAN
+
+    if key_lower.indexOf("path") != null or key_lower.indexOf("file") != null or
+        key_lower.indexOf("folder") != null or key_lower.indexOf("destination") != null then
+        if context_lower.indexOf("log ") != null or context_lower.indexOf("cleanup") != null then
+            return COLOR_ORANGE
+        end if
+        return COLOR_PURPLE
+    end if
+    if key_lower.indexOf("vuln") != null or key_lower.indexOf("overflow") != null or
+        key_lower.indexOf("address") != null or key_lower.indexOf("region") != null or
+        key_lower.indexOf("coverage") != null then return COLOR_PURPLE
+
+    if key_lower.indexOf("mode") != null or key_lower.indexOf("role") != null or
+        key_lower.indexOf("source") != null or key_lower.indexOf("reason") != null or
+        key_lower.indexOf("action") != null or key_lower.indexOf("limit") != null or
+        key_lower.indexOf("seconds") != null or key_lower.indexOf("rate") != null or
+        key_lower.indexOf("scope") != null or key_lower.indexOf("info") != null then
+        return COLOR_ORANGE
+    end if
+    if key_lower.indexOf("focus") != null or key_lower.indexOf("state") != null then return COLOR_PINK
+    return COLOR_DIM
+end function
+
+
+semantic_diag_field = function(field, context)
+    cleaned = field.trim
+    if cleaned == "" then return ""
+    equals = cleaned.indexOf("=")
+    if equals == null then return paint(cleaned, semantic_diag_color("", cleaned, context))
+    key = cleaned[:equals].trim
+    value = cleaned[equals + 1:].trim
+    return key.replace("_", " ") + "=" + paint(value, semantic_diag_color(key, value, context))
+end function
+
+
+semantic_diag_lead = function(lead)
+    cleaned = lead.trim
+    lowered = cleaned.lower
+    if cleaned == "" then return ""
+    if lowered.indexOf("failed") != null or lowered.indexOf("rejected") != null or
+        lowered.indexOf("refused") != null or lowered.indexOf("unavailable") != null or
+        lowered.indexOf("exhausted") != null or lowered.indexOf("incomplete") != null or
+        lowered.indexOf("without match") != null then
+        return paint(cleaned, COLOR_RED)
+    end if
+    if lowered.indexOf("skip") != null then return paint(cleaned, COLOR_ORANGE)
+    if lowered.indexOf("complete") != null or lowered.indexOf("accepted") != null or
+        lowered.indexOf("ready") != null or lowered.indexOf("retained") != null or
+        lowered.indexOf("success") != null or lowered.indexOf("copied") != null or
+        lowered.indexOf("staged") != null or lowered.indexOf("match") != null then
+        return paint(cleaned, COLOR_GREEN)
+    end if
+    if lowered.indexOf("cleanup") != null or lowered.indexOf("upload") != null or
+        lowered.indexOf("download") != null or
+        lowered.indexOf("import") != null or lowered.indexOf("export") != null then
+        return paint(cleaned, COLOR_ORANGE)
+    end if
+    if lowered.indexOf("vuln") == 0 or lowered.indexOf("coverage") == 0 or
+        lowered.indexOf("scan ") == 0 or lowered.indexOf("hunt ") == 0 or
+        lowered.indexOf("locator ") == 0 or lowered.indexOf("fresh ") == 0 then
+        return paint(cleaned, COLOR_PURPLE)
+    end if
+    if lowered.indexOf("target ") == 0 or lowered.indexOf("service ") == 0 or
+        lowered.indexOf("database connection") == 0 then return paint(cleaned, COLOR_CYAN)
+    return paint(cleaned, COLOR_DIM)
+end function
+
+
+terminal_diag_line = function(message, line)
+    parts = message.split("[|]")
+    lead = parts[0].trim
+    lowered = lead.lower
+    badge = paint("[ACLOG " + globals.log_seq + "]", COLOR_DIM)
+    label = "EVENT"
+    label_color = COLOR_PURPLE
+
+    if lowered.indexOf("cleanup") != null or lowered.indexOf("execution logs") != null then
+        label = "CLEANUP"
+        label_color = COLOR_ORANGE
+    else if lowered.indexOf("database connection") != null then
+        label = "DATABASE ROUTE"
+        label_color = COLOR_PURPLE
+    else if lowered.indexOf("database sync") != null or lowered.indexOf("import ") != null then
+        label = "DATABASE SYNC"
+        label_color = COLOR_PURPLE
+    else if lowered.indexOf("outbox") != null then
+        label = "OUTBOX"
+        label_color = COLOR_ORANGE
+    else if lowered.indexOf("coverage") != null or lowered.indexOf("vuln db") != null or
+        lowered.indexOf("vuln bucket") != null then
+        label = "COVERAGE"
+        label_color = COLOR_PURPLE
+    else if lowered.indexOf("vuln scan") != null then
+        label = "VULNERABILITY"
+        label_color = COLOR_PURPLE
+    else if lowered.indexOf("locator") != null then
+        label = "LOCATOR"
+        label_color = COLOR_PURPLE
+    else if lowered.indexOf("library") != null or lowered.indexOf("version ") != null then
+        if lowered.indexOf("unavailable") != null then
+            label = "LIBRARY UNAVAILABLE"
+            label_color = COLOR_RED
+        else if lowered.indexOf("skip") != null then
+            label = "LIBRARY SKIP"
+            label_color = COLOR_ORANGE
+        else
+            label = "LIBRARY READY"
+            label_color = COLOR_GREEN
+        end if
+    else if lowered.indexOf("service ") != null or lowered.indexOf("endpoint ") != null then
+        if lowered.indexOf("unavailable") != null or lowered.indexOf("rejected") != null then
+            label = "ENDPOINT REJECTED"
+            label_color = COLOR_RED
+        else
+            label = "ENDPOINT PROBE"
+            label_color = COLOR_PURPLE
+        end if
+    else if lowered.indexOf("focus") != null then
+        label = "RESEARCH FOCUS"
+        label_color = COLOR_PURPLE
+    else if lowered.indexOf("target ") != null then
+        label = "TARGET SWEEP"
+        label_color = COLOR_PURPLE
+    else if lowered.indexOf("hunt ") != null then
+        label = "RESEARCH HUNT"
+        label_color = COLOR_PURPLE
+    else if lowered.indexOf("fresh ") != null then
+        label = "RUN STATE"
+        label_color = COLOR_PURPLE
+    end if
+
+    if lowered.indexOf("skip") != null then label_color = COLOR_ORANGE
+
+    if lowered.indexOf("failed") != null or lowered.indexOf("rejected") != null or
+        lowered.indexOf("refused") != null or lowered.indexOf("unavailable") != null or
+        lowered.indexOf("incomplete") != null or lowered.indexOf("without match") != null then
+        label_color = COLOR_RED
+    end if
+
+    output = paint("◆ " + label, label_color) + "  " + badge
+    lead_output = semantic_diag_lead(lead)
+    if lead_output != "" then output = output + "  " + lead_output
+
+    branch = ""
+    fields_on_branch = 0
+    if parts.len > 1 then
+        for index in range(1, parts.len - 1)
+            field_output = semantic_diag_field(parts[index], lead)
+            if field_output == "" then continue
+            if fields_on_branch == 0 then
+                branch = paint("  ╰ ", COLOR_DIM) + field_output
+            else
+                branch = branch + "  |  " + field_output
+            end if
+            fields_on_branch = fields_on_branch + 1
+            if fields_on_branch == 2 then
+                output = output + char(10) + branch
+                branch = ""
+                fields_on_branch = 0
+            end if
+        end for
+    end if
+    if fields_on_branch > 0 then output = output + char(10) + branch
+    return output
 end function
 
 
@@ -258,14 +619,15 @@ end function
 
 diag = function(message)
     globals.log_seq = globals.log_seq + 1
-    line = "[ARLOG " + globals.log_seq + "] " + message
-    print(terminal_diag(message, line))
+    line = "[ACLOG " + globals.log_seq + "] " + message
+    print(terminal_diag_line(message, line))
     globals.log_pending.push(line)
     if globals.log_pending.len >= 10 then flush_log
 end function
 
 
 reset_stats = function()
+    globals.visual_attack_index = 0
     globals.stats = {"targets": 0, "routers": 0, "services": 0, "libraries": 0,
         "complete_skips": 0, "partial": 0, "unknown": 0, "fresh_scans": 0,
         "new_vulns": 0, "overflows": 0, "useful": 0, "prefilter_skips": 0,
@@ -342,6 +704,59 @@ access_level = function(value)
         if has_rwx(folder) then return "user"
     end for
     return "guest"
+end function
+
+
+access_color = function(level)
+    level = str(level).lower
+    if level == "root" or level == "user" or level == "guest" then return COLOR_PINK
+    return COLOR_RED
+end function
+
+
+result_color = function(value)
+    if value then return COLOR_GREEN
+    return COLOR_RED
+end function
+
+
+show_attack_attempt = function(fingerprint, attempt, mode, cleanup_only = false)
+    globals.visual_attack_index = globals.visual_attack_index + 1
+    print(paint("◆ ATTACK ", COLOR_PURPLE) +
+        paint("[" + globals.visual_attack_index + "]", COLOR_PINK) +
+        "  " + paint(fingerprint, COLOR_CYAN) + "  " + paint(mode, COLOR_ORANGE))
+end function
+
+
+show_attack_result = function(value)
+    if value == null then
+        print(event_branch("NO USABLE RESULT", COLOR_RED, "null", COLOR_RED))
+        return
+    end if
+    kind = typeof(value).lower
+    if is_exploit_object(value) then
+        level = access_level(value)
+        label = "OBJECT RETAINED"
+        if is_shell(value) then label = "ACCESS RETAINED"
+        print(paint("  ╰ " + label, COLOR_GREEN) + "  " + paint(kind, COLOR_CYAN) +
+            "  authority=" + paint(level, access_color(level)))
+        return
+    end if
+    if kind == "number" then
+        print(event_branch("PAYLOAD ACCEPTED", COLOR_GREEN, "numeric return", COLOR_PINK))
+        return
+    end if
+    print(event_branch("NO USABLE RESULT", COLOR_RED, kind, COLOR_RED))
+end function
+
+
+show_cleanup_state = function(label, computer_ok, router_ok, residual)
+    print(event_line(label, COLOR_ORANGE))
+    print(paint("  ╰ ", COLOR_DIM) + "computer=" +
+        paint(computer_ok, result_color(computer_ok)) + "  |  router=" +
+        paint(router_ok, result_color(router_ok)))
+    print(paint("  ╰ ", COLOR_DIM) + "residual=" +
+        paint(residual, result_color(not residual)))
 end function
 
 
@@ -513,9 +928,62 @@ clean_execution_route = function()
     if router_ok then
         globals.stats.execution_router_clean = globals.stats.execution_router_clean + 1
     end if
+    show_cleanup_state("EXECUTION LOGS", computer_ok, router_ok, not computer_ok)
     diag("execution logs clean | computer=" + computer_ok + " | router=" + router_ok)
     if not computer_ok then globals.stats.execution_failures = globals.stats.execution_failures + 1
     return computer_ok
+end function
+
+
+open_database_connection = function(action)
+    if not database_configured then
+        print(event_line("DATABASE ROUTE REFUSED", COLOR_RED,
+            "server not configured in AutoRecon source", COLOR_ORANGE))
+        return null
+    end if
+    if not prepare_execution_cleanup then
+        print(event_line("DATABASE ROUTE REFUSED", COLOR_RED,
+            "execution-host cleanup could not be staged", COLOR_ORANGE))
+        clean_execution_route
+        return null
+    end if
+    show_database_action(action)
+    remote_shell = globals.local_shell.connect_service(DATABASE_SERVER_IP,
+        DATABASE_SERVER_SSH_PORT, DATABASE_SERVER_SSH_USER,
+        DATABASE_SERVER_SSH_PASSWORD, "ssh")
+    if not is_shell(remote_shell) then
+        print(event_line("DATABASE ROUTE REFUSED", COLOR_RED,
+            "SSH connection failed", COLOR_RED))
+        diag("database connection failed | action=" + action + " | host=" +
+            DATABASE_SERVER_IP + ":" + DATABASE_SERVER_SSH_PORT)
+        clean_execution_route
+        return null
+    end if
+    computer_source = stage_clean_source(remote_shell)
+    router_stage = stage_remote_router_source(remote_shell)
+    diag("database connection ready | action=" + action + " | host=" +
+        DATABASE_SERVER_IP + ":" + DATABASE_SERVER_SSH_PORT + " | computer=" +
+        is_file(computer_source) + " | router=" + is_file(router_stage.source))
+    return {"shell": remote_shell, "computer_source": computer_source,
+        "router_source": router_stage.source, "helper": router_stage.helper,}
+end function
+
+
+finalize_database_connection = function(bundle, action)
+    if typeof(bundle).lower != "map" then return false
+    remote_shell = bundle.shell
+    delete_remote_helper(remote_shell, bundle.helper)
+    bundle.shell = null
+    remote_shell = null
+    wait(FINALIZER_WAIT_SECONDS)
+    computer_ok = clean_source(bundle.computer_source)
+    router_ok = clean_source(bundle.router_source)
+    execution_ok = clean_execution_route
+    show_cleanup_state("DATABASE " + action.upper + " ROUTE", computer_ok, router_ok,
+        not computer_ok or not execution_ok)
+    diag("database connection finalized | action=" + action + " | computer=" +
+        computer_ok + " | router=" + router_ok + " | execution=" + execution_ok)
+    return computer_ok and execution_ok
 end function
 
 
@@ -891,7 +1359,7 @@ save_research = function()
 end function
 
 
-init_vulns = function()
+reset_research_memory = function()
     globals.vulns = {}
     globals.vuln_meta = {}
     globals.vuln_scanned = {}
@@ -901,15 +1369,44 @@ init_vulns = function()
     globals.vuln_dirty = false
     globals.vuln_dirty_fingerprints = {}
     globals.outbox_fingerprints = {}
+end function
+
+
+load_endpoint_research = function()
+    seed_count = load_coverage_seed
+    outbox_count = load_outbox
+    return {"seed": seed_count, "outbox": outbox_count,}
+end function
+
+
+init_vulns = function()
+    reset_research_memory
+    globals.database_role = resolve_database_role
     state = load_vuln_index
-    globals.authoritative_db = state == VULN_DB_INDEX_HEADER
+    globals.authoritative_db = false
+    if globals.database_role == "authoritative" then
+        ensure_folder_path(VULN_DB_ROOT)
+        if state != VULN_DB_INDEX_HEADER then
+            index = globals.local_computer.File(VULN_DB_INDEX_PATH)
+            if not is_file(index) then index = globals.local_computer.touch(VULN_DB_ROOT, "index.txt")
+            if is_file(index) then index.set_content(VULN_DB_INDEX_HEADER)
+            state = load_vuln_index
+        end if
+        globals.authoritative_db = state == VULN_DB_INDEX_HEADER
+    else if globals.database_role == "standalone" and state == VULN_DB_INDEX_HEADER then
+        // Preserve the old one-machine behavior when an existing ACVDB3 is present.
+        globals.database_role = "authoritative"
+        globals.authoritative_db = true
+    end if
     seed_count = 0
     outbox_count = 0
     if not globals.authoritative_db then
-        seed_count = load_coverage_seed
-        outbox_count = load_outbox
+        loaded = load_endpoint_research
+        seed_count = loaded.seed
+        outbox_count = loaded.outbox
     end if
-    diag("vuln db ready | authoritative=" + globals.authoritative_db + " | state=" + state +
+    diag("vuln db ready | role=" + globals.database_role + " | authoritative=" +
+        globals.authoritative_db + " | state=" + state +
         " | seed_entries=" + seed_count + " | outbox_entries=" + outbox_count)
 end function
 
@@ -1110,10 +1607,13 @@ end function
 
 
 show_focus = function()
-    text = globals.focus_mode
-    if globals.focus_library != "" then text = text + " " + globals.focus_library
-    if globals.focus_version != "" then text = text + " " + globals.focus_version
-    print(paint("Focus: ", COLOR_PURPLE) + paint(text, COLOR_CYAN))
+    library = globals.focus_library
+    version = globals.focus_version
+    if library == "" then library = "ALL LIBRARIES"
+    if version == "" then version = "ALL VERSIONS"
+    print(event_line("RESEARCH FOCUS", COLOR_PURPLE, globals.focus_mode.upper, COLOR_PINK))
+    print(paint("  ╰ ", COLOR_DIM) + "library=" + paint(library, COLOR_CYAN) +
+        "  |  version=" + paint(version, COLOR_CYAN))
 end function
 
 
@@ -1241,27 +1741,31 @@ show_locator_progress = function(attempts, started, last_ip)
     elapsed = time - started
     rate = attempts
     if elapsed > 0 then rate = attempts / elapsed
-    print(paint("◆ SWEEP ", COLOR_PURPLE) + paint(attempts, COLOR_PINK) +
-        paint("  RATE ", COLOR_PURPLE) + paint(rate, COLOR_GREEN) +
-        paint("/s  LAST ", COLOR_PURPLE) + paint(last_ip, COLOR_CYAN) +
-        paint("  OBSERVED ", COLOR_PURPLE) + paint(globals.locator_last_version, COLOR_ORANGE))
+    print(event_line("LOCATOR SWEEP", COLOR_PURPLE, attempts + " ATTEMPTS", COLOR_PINK))
+    print(paint("  ╰ ", COLOR_DIM) + "rate=" + paint(rate + "/s", COLOR_GREEN) +
+        "  |  last=" + paint(last_ip, COLOR_CYAN))
+    print(paint("  ╰ ", COLOR_DIM) + "observed=" +
+        paint(globals.locator_last_version, COLOR_ORANGE))
 end function
 
 
 find_exact_library = function(requested_library, version, max_attempts = 0)
     library = canonical_locator_library(requested_library)
     if version.trim == "" then
-        print(paint("Usage: find <library> <version> [max-attempts]", COLOR_RED))
+        print(usage_line("find <library> <version> [max-attempts]"))
         return false
     end if
     if max_attempts < 0 then
-        print(paint("Maximum attempts cannot be negative.", COLOR_RED))
+        print(event_line("LOCATOR REFUSED", COLOR_RED,
+            "maximum attempts cannot be negative", COLOR_ORANGE))
         return false
     end if
     if not locator_is_observable(library) then
-        print(paint("◆ LOCATOR REFUSED", COLOR_RED) + "  " + paint(library, COLOR_PURPLE))
-        print("  " + paint("This is an internal dependency, not a public service identity.", COLOR_ORANGE))
-        print("  " + paint("Use huntlib for vulnerability coverage or acquire it from a known host.", COLOR_GREEN))
+        print(event_line("LOCATOR REFUSED", COLOR_RED, library, COLOR_CYAN))
+        print(event_branch("REASON", COLOR_RED,
+            "internal dependency, not a public service identity", COLOR_ORANGE))
+        print(event_branch("NEXT", COLOR_GREEN,
+            "use huntlib for coverage or acquire it from a known host", COLOR_GREEN))
         return false
     end if
     globals.locator_last_version = "none"
@@ -1270,11 +1774,13 @@ find_exact_library = function(requested_library, version, max_attempts = 0)
     attempts = 0
     limit_text = "until-match"
     if max_attempts > 0 then limit_text = str(max_attempts)
-    show_auto_action("EXACT LIBRARY LOCATOR", library + "@" + version, COLOR_PURPLE)
-    print("  " + paint("FILTER", COLOR_PINK) + "  " +
-        paint(locator_service_token(library), COLOR_CYAN) + "  " +
-        paint("LIMIT", COLOR_PINK) + "  " + paint(limit_text, COLOR_ORANGE))
-    print("  " + paint("Metadata sweep only; unrelated services are ignored.", COLOR_GREEN))
+    show_auto_action("EXACT LIBRARY LOCATOR", library + "@" + version,
+        COLOR_PURPLE, COLOR_CYAN)
+    print(paint("  ╰ ", COLOR_DIM) + "filter=" +
+        paint(locator_service_token(library), COLOR_CYAN) + "  |  limit=" +
+        paint(limit_text, COLOR_ORANGE))
+    print(event_branch("SCOPE", COLOR_GREEN,
+        "metadata only; unrelated services ignored", COLOR_GREEN))
     diag("locator start | library=" + library + " | version=" + version +
         " | limit=" + limit_text)
     while max_attempts == 0 or attempts < max_attempts
@@ -1291,14 +1797,14 @@ find_exact_library = function(requested_library, version, max_attempts = 0)
             globals.last_locator = {"library": library, "version": version, "ip": ip,
                 "port": match.port, "lan": match.lan, "info": match.info,}
             elapsed = time - started
-            print(char(10) + paint("◆ EXACT LIBRARY FOUND", COLOR_GREEN))
-            print("  " + paint("LIBRARY", COLOR_PINK) + "  " + paint(library + " " + version, COLOR_PURPLE))
-            print("  " + paint("PUBLIC", COLOR_PINK) + "   " + paint(ip + ":" + match.port, COLOR_CYAN))
-            print("  " + paint("LAN", COLOR_PINK) + "      " + paint(match.lan, COLOR_CYAN))
-            print("  " + paint("SERVICE", COLOR_PINK) + "  " + paint(match.info, COLOR_GREEN))
-            print("  " + paint("SEARCH", COLOR_PINK) + "   attempts=" + paint(attempts, COLOR_CYAN) +
-                "  seconds=" + paint(elapsed, COLOR_ORANGE))
-            print("  " + paint("SAVED", COLOR_PINK) + "    " + paint(FINDING_PATH, COLOR_ORANGE))
+            print(char(10) + event_line("EXACT LIBRARY FOUND", COLOR_GREEN,
+                library + "@" + version, COLOR_CYAN))
+            print(paint("  ╰ ", COLOR_DIM) + "public=" + paint(ip + ":" + match.port, COLOR_CYAN) +
+                "  |  lan=" + paint(match.lan, COLOR_CYAN))
+            print(paint("  ╰ ", COLOR_DIM) + "service=" + paint(match.info, COLOR_CYAN))
+            print(paint("  ╰ ", COLOR_DIM) + "attempts=" + paint(attempts, COLOR_PINK) +
+                "  |  seconds=" + paint(elapsed, COLOR_ORANGE))
+            print(event_branch("SAVED", COLOR_GREEN, FINDING_PATH, COLOR_PURPLE))
             diag("locator match | library=" + library + " | version=" + version +
                 " | host=" + ip + ":" + match.port + " | lan=" + match.lan +
                 " | attempts=" + attempts + " | seconds=" + elapsed)
@@ -1309,8 +1815,9 @@ find_exact_library = function(requested_library, version, max_attempts = 0)
         end if
     end while
     elapsed = time - started
-    print(paint("◆ LOCATOR LIMIT REACHED", COLOR_RED) + "  attempts=" +
-        paint(attempts, COLOR_PINK) + "  seconds=" + paint(elapsed, COLOR_ORANGE))
+    print(event_line("LOCATOR LIMIT REACHED", COLOR_RED))
+    print(paint("  ╰ ", COLOR_DIM) + "attempts=" + paint(attempts, COLOR_PINK) +
+        "  |  seconds=" + paint(elapsed, COLOR_ORANGE))
     diag("locator complete without match | library=" + library + " | version=" + version +
         " | attempts=" + attempts + " | seconds=" + elapsed)
     return true
@@ -1339,11 +1846,16 @@ probe_entries = function(session, meta_lib, entries, cleanup_only = false)
             if attempts >= limit then break
             attempts = attempts + 1
             globals.stats.overflows = globals.stats.overflows + 1
+            attack_mode = "credential payload"
+            if argument == "__AR_PLAIN__" then attack_mode = "plain overflow"
+            show_attack_attempt(entry.lib + "@" + entry.version, attempts, attack_mode,
+                cleanup_only)
             if argument == "__AR_PLAIN__" then
                 result = meta_lib.overflow(entry.region, entry.unsafe)
             else
                 result = meta_lib.overflow(entry.region, entry.unsafe, argument)
             end if
+            show_attack_result(result)
             record_vuln_result(entry, result, not cleanup_only)
             if is_exploit_object(result) then
                 globals.stats.useful = globals.stats.useful + 1
@@ -1367,21 +1879,23 @@ end function
 
 
 inspect_service = function(ip, endpoint)
+    show_auto_action("ENDPOINT PROBE", ip + ":" + endpoint.port,
+        COLOR_PURPLE, COLOR_CYAN)
     session = globals.metaxploit.net_use(ip, endpoint.port)
     if not is_session(session) then
+        show_auto_action("ENDPOINT REJECTED", "service unavailable", COLOR_RED, COLOR_RED)
         globals.stats.residual = globals.stats.residual + 1
-        diag("service unavailable | host=" + ip + ":" + endpoint.port +
-            " | residual_risk=true")
+        diag("service unavailable | host=" + ip + ":" + endpoint.port + " | residual_risk=true")
         return false
     end if
     globals.stats.services = globals.stats.services + 1
     meta_lib = session.dump_lib
     if not is_meta_lib(meta_lib) then
+        show_auto_action("ENDPOINT REJECTED", "library unavailable", COLOR_RED, COLOR_RED)
         session = null
         wait(FINALIZER_WAIT_SECONDS)
         globals.stats.residual = globals.stats.residual + 1
-        diag("library unavailable | host=" + ip + ":" + endpoint.port +
-            " | residual_risk=true")
+        diag("library unavailable | host=" + ip + ":" + endpoint.port + " | residual_risk=true")
         return false
     end if
     library = meta_lib.lib_name
@@ -1390,20 +1904,22 @@ inspect_service = function(ip, endpoint)
     focus_match = focus_matches(library, version)
     state = coverage_state(library, version)
     if not focus_match then
+        show_auto_action("FOCUS SKIP", library + "@" + version, COLOR_ORANGE, COLOR_CYAN)
+        print(event_branch("REASON", COLOR_ORANGE, "focus mismatch; cleanup known only", COLOR_ORANGE))
         diag("library skipped | host=" + ip + ":" + endpoint.port + " | library=" +
             library + "@" + version + " | reason=focus-mismatch | cleanup=known-only")
     end if
     state_color = COLOR_ORANGE
     if state == "complete" then state_color = COLOR_GREEN
     if state == "unknown" then state_color = COLOR_PURPLE
-    print("  " + paint(ip + ":" + endpoint.port, COLOR_CYAN) + "  " +
-        paint(library + " " + version, COLOR_PINK) + "  " + paint(state.upper, state_color))
+    print(paint("  ╰ LIBRARY READY", COLOR_GREEN) + "  " +
+        paint(library + "@" + version, COLOR_CYAN) +
+        "  state=" + paint(state.upper, state_color))
     cleanup_only = not focus_match
     if globals.focus_mode == "discover" and state != "unknown" then
         globals.stats.complete_skips = globals.stats.complete_skips + 1
         diag("version already cataloged skip | host=" + ip + ":" + endpoint.port +
-            " | library=" + library + "@" + version + " | state=" + state +
-            " | cleanup=known-only")
+            " | library=" + library + "@" + version + " | state=" + state + " | cleanup=known-only")
         cleanup_only = true
     else if state == "complete" and globals.focus_mode != "force" then
         globals.stats.complete_skips = globals.stats.complete_skips + 1
@@ -1432,6 +1948,8 @@ inspect_service = function(ip, endpoint)
     if probe.risk and not computer_ok then globals.stats.residual = globals.stats.residual + 1
     mode_name = "research"
     if cleanup_only then mode_name = "known-only"
+    show_cleanup_state("TARGET CLEANUP " + mode_name.upper, computer_ok, router_ok,
+        probe.risk and not computer_ok)
     diag("target cleanup | attempted=" + probe.attempts + " | computer=" + computer_ok +
         " | router=" + router_ok + " | residual_risk=" + (probe.risk and not computer_ok) +
         " | mode=" + mode_name)
@@ -1443,11 +1961,13 @@ end function
 
 scan_target = function(ip, requested_port = 0)
     if not prepare_execution_cleanup then
-        print(paint("Execution-computer cleanup is unavailable; recon stopped.", COLOR_RED))
+        print(event_line("RESEARCH REFUSED", COLOR_RED,
+            "execution-computer cleanup unavailable", COLOR_ORANGE))
         return false
     end if
     globals.stats.targets = globals.stats.targets + 1
-    print(char(10) + paint("Target ", COLOR_PURPLE) + paint(ip, COLOR_CYAN))
+    print("")
+    show_auto_action("TARGET SWEEP", ip, COLOR_PURPLE, COLOR_CYAN)
     router = get_router(ip)
     if typeof(router).lower != "router" then
         diag("target unavailable | host=" + ip)
@@ -1465,8 +1985,7 @@ scan_target = function(ip, requested_port = 0)
         if not endpoint_matches_focus(endpoint) then
             globals.stats.prefilter_skips = globals.stats.prefilter_skips + 1
             diag("service prefilter skip | host=" + ip + ":" + endpoint.port +
-                " | info=" + endpoint.info + " | focus=" + globals.focus_library +
-                " | service_net_use=0")
+                " | info=" + endpoint.info + " | focus=" + globals.focus_library + " | service_net_use=0")
             continue
         end if
         inspect_service(ip, endpoint)
@@ -1478,7 +1997,8 @@ end function
 
 hunt = function(count)
     if count < 1 or count > MAX_HUNT_COUNT then
-        print(paint("Hunt count must be between 1 and " + MAX_HUNT_COUNT + ".", COLOR_RED))
+        print(event_line("RESEARCH REFUSED", COLOR_RED,
+            "hunt count must be between 1 and " + MAX_HUNT_COUNT, COLOR_ORANGE))
         return false
     end if
     reset_stats
@@ -1523,7 +2043,9 @@ end function
 
 show_coverage = function(library, version_filter = "")
     load_library_coverage(library)
-    print(paint("Coverage " + library, COLOR_PURPLE))
+    detail = library
+    if version_filter != "" then detail = detail + " " + version_filter
+    print(char(10) + event_line("COVERAGE", COLOR_PURPLE, detail, COLOR_CYAN))
     found = 0
     complete = 0
     partial = 0
@@ -1540,18 +2062,22 @@ show_coverage = function(library, version_filter = "")
             partial = partial + 1
         end if
         count = globals.vulns[fingerprint].len
-        print("  " + paint(meta[0] + " " + meta[1], COLOR_CYAN) + "  " +
-            paint(state.upper, color) + "  entries=" + count)
+        print(event_branch("VERSION", COLOR_CYAN, meta[0] + "@" + meta[1], COLOR_CYAN) +
+            "  state=" + paint(state.upper, color))
+        print(paint("  ╰ ", COLOR_DIM) + "entries=" + paint(count, COLOR_PINK))
         found = found + 1
     end for
-    print("Observed versions: " + paint(found, COLOR_CYAN) + "  complete=" +
-        paint(complete, COLOR_GREEN) + "  partial=" + paint(partial, COLOR_ORANGE))
+    print(event_line("COVERAGE SUMMARY", COLOR_PURPLE))
+    print(paint("  ╰ ", COLOR_DIM) + "observed=" + paint(found, COLOR_PINK) +
+        "  |  complete=" + paint(complete, COLOR_GREEN))
+    print(paint("  ╰ ", COLOR_DIM) + "partial=" + paint(partial, COLOR_ORANGE))
 end function
 
 
 export_coverage = function()
     if not globals.authoritative_db then
-        print(paint("Coverage export requires the authoritative /root/vulndb host.", COLOR_RED))
+        print(event_line("COVERAGE EXPORT REFUSED", COLOR_RED,
+            "authoritative /root/vulndb host required", COLOR_ORANGE))
         return false
     end if
     for key in globals.vuln_index.indexes
@@ -1589,10 +2115,20 @@ export_coverage = function()
         end for
     end if
     index = touch_file(globals.sync_folder, "coverage-index.txt")
-    if is_file(index) then
-        index.set_content(COVERAGE_INDEX_HEADER + char(10) + "S|" + number + char(10) +
-            "V|" + versions)
+    index_content = COVERAGE_INDEX_HEADER + char(10) + "S|" + number + char(10) +
+        "V|" + versions
+    if not is_file(index) or index.set_content(index_content) != 1 or
+        index.get_content != index_content then
+        print(event_line("COVERAGE EXPORT FAILED", COLOR_RED,
+            "index could not be written and verified", COLOR_RED))
+        diag("coverage export failed | reason=index-write-verification | versions=" +
+            versions + " | shards=" + number)
+        return false
     end if
+    show_auto_action("COVERAGE EXPORTED", "verified", COLOR_GREEN, COLOR_GREEN)
+    print(paint("  ╰ ", COLOR_DIM) + "versions=" + paint(versions, COLOR_PINK) +
+        "  |  shards=" + paint(number, COLOR_PINK))
+    print(event_branch("DESTINATION", COLOR_PURPLE, SYNC_ROOT, COLOR_PURPLE))
     diag("coverage export complete | versions=" + versions + " | shards=" + number +
         " | path=" + SYNC_ROOT)
     return true
@@ -1612,7 +2148,8 @@ end function
 
 import_inbox = function()
     if not globals.authoritative_db then
-        print(paint("Inbox import requires the authoritative /root/vulndb host.", COLOR_RED))
+        print(event_line("INBOX IMPORT REFUSED", COLOR_RED,
+            "authoritative /root/vulndb host required", COLOR_ORANGE))
         return false
     end if
     files = globals.inbox_folder.get_files
@@ -1630,11 +2167,13 @@ import_inbox = function()
         accepted.push(file)
     end for
     if accepted.len == 0 then
-        print(paint("No compatible AutoRecon inbox shards found.", COLOR_ORANGE))
+        print(event_line("INBOX EMPTY", COLOR_ORANGE,
+            "no compatible AutoRecon shards found", COLOR_ORANGE))
         return true
     end if
     if not save_vulns then
-        print(paint("Import save failed; inbox files were preserved.", COLOR_RED))
+        print(event_line("INBOX IMPORT FAILED", COLOR_RED,
+            "save failed; inbox files preserved", COLOR_RED))
         return false
     end if
     for file in accepted
@@ -1645,73 +2184,458 @@ import_inbox = function()
 end function
 
 
+valid_outbox_files = function()
+    result = []
+    files = globals.outbox_folder.get_files
+    if typeof(files).lower != "list" then return result
+    for file in files
+        if file.name.indexOf(OUTBOX_SHARD_PREFIX) != 0 then continue
+        content = file.get_content
+        if typeof(content).lower != "string" then continue
+        lines = content.replace(char(13), "").split(char(10))
+        if lines.len == 0 or lines[0].trim != OUTBOX_HEADER then continue
+        result.push({"file": file, "content": content,})
+    end for
+    return result
+end function
+
+
+next_remote_inbox_name = function(remote_computer, remote_folder, start_number)
+    source = path_component(globals.local_computer.public_ip)
+    number = start_number
+    while number < 10000
+        name = OUTBOX_SHARD_PREFIX + "from-" + source + "-" + pad4(number) + ".txt"
+        if not is_file(remote_computer.File(join_path(remote_folder.path, name))) then return name
+        number = number + 1
+    end while
+    return ""
+end function
+
+
+upload_outbox = function()
+    if not save_research then
+        print(event_line("OUTBOX UPLOAD REFUSED", COLOR_RED,
+            "save failed; no transfer attempted", COLOR_RED))
+        return false
+    end if
+    pending = valid_outbox_files
+    if pending.len == 0 then
+        print(event_line("OUTBOX EMPTY", COLOR_ORANGE,
+            "nothing waiting for upload", COLOR_ORANGE))
+        return true
+    end if
+    bundle = open_database_connection("upload")
+    if typeof(bundle).lower != "map" then return false
+    remote_shell = bundle.shell
+    remote_computer = remote_shell.host_computer
+    remote_folder = ensure_remote_folder_path(remote_shell, join_path(DATABASE_REMOTE_ROOT, "inbox"))
+    transfer_ok = is_file(remote_folder)
+    transferred = 0
+    remote_number = 1
+    if transfer_ok then
+        for item in pending
+            remote_name = next_remote_inbox_name(remote_computer, remote_folder, remote_number)
+            if remote_name == "" then
+                transfer_ok = false
+                break
+            end if
+            staged = globals.local_computer.File(join_path(globals.task_folder.path, remote_name))
+            if is_file(staged) then staged.delete
+            staged = touch_file(globals.task_folder, remote_name)
+            if not is_file(staged) or staged.set_content(item.content) != 1 then
+                if is_file(staged) then staged.delete
+                transfer_ok = false
+                break
+            end if
+            copied = globals.local_shell.scp(staged.path, remote_folder.path, remote_shell) == 1
+            remote_file = remote_computer.File(join_path(remote_folder.path, remote_name))
+            verified = copied and is_file(remote_file) and remote_file.get_content == item.content
+            if is_file(staged) then staged.delete
+            if not verified then
+                transfer_ok = false
+                break
+            end if
+            transferred = transferred + 1
+            remote_number = remote_number + 1
+        end for
+    end if
+    cleanup_ok = finalize_database_connection(bundle, "upload")
+    if not transfer_ok or transferred != pending.len then
+        print(event_line("OUTBOX UPLOAD INCOMPLETE", COLOR_RED,
+            "every local shard preserved", COLOR_RED))
+        diag("outbox upload incomplete | verified=" + transferred + "/" + pending.len +
+            " | cleanup=" + cleanup_ok)
+        return false
+    end if
+    for item in pending
+        if is_file(item.file) then item.file.delete
+    end for
+    index = globals.local_computer.File(join_path(OUTBOX_ROOT, "index.txt"))
+    if is_file(index) then index.delete
+    reset_research_memory
+    loaded = load_endpoint_research
+    diag("outbox upload complete | shards=" + transferred + " | cleanup=" + cleanup_ok +
+        " | remaining=" + loaded.outbox)
+    print(event_line("OUTBOX UPLOADED", COLOR_GREEN, "verified", COLOR_GREEN))
+    print(event_branch("SHARDS", COLOR_PINK, transferred, COLOR_PINK))
+    if not cleanup_ok then
+        print(event_line("DATABASE ROUTE WARNING", COLOR_ORANGE,
+            "transfer succeeded; cleanup incomplete", COLOR_ORANGE))
+    end if
+    return true
+end function
+
+
+remote_seed_files = function(remote_folder)
+    result = []
+    files = remote_folder.get_files
+    if typeof(files).lower != "list" then return result
+    for file in files
+        if file.name == "coverage-index.txt" or file.name.indexOf(COVERAGE_SHARD_PREFIX) == 0 then
+            result.push(file)
+        end if
+    end for
+    return result
+end function
+
+
+coverage_seed_validation = function(records)
+    verdict = {"ok": false, "reason": "seed-empty", "shards": 0, "versions": 0,}
+    if typeof(records).lower != "list" or records.len == 0 then return verdict
+    seen_files = {}
+    seen_versions = {}
+    index_count = 0
+    declared_shards = -1
+    declared_versions = -1
+    actual_shards = 0
+    for record in records
+        name = str(record.name)
+        content = record.content
+        if seen_files.hasIndex(name) then
+            verdict.reason = "duplicate-file:" + name
+            return verdict
+        end if
+        seen_files[name] = true
+        if typeof(content).lower != "string" then
+            verdict.reason = "non-text-file:" + name
+            return verdict
+        end if
+        lines = content.replace(char(13), "").split(char(10))
+        if name == "coverage-index.txt" then
+            index_count = index_count + 1
+            if lines.len == 0 or lines[0].trim != COVERAGE_INDEX_HEADER then
+                verdict.reason = "index-header-mismatch"
+                return verdict
+            end if
+            for line in lines
+                parts = line.trim.split("[|]")
+                if parts.len != 2 then continue
+                if parts[0] == "S" then declared_shards = parts[1].to_int
+                if parts[0] == "V" then declared_versions = parts[1].to_int
+            end for
+            continue
+        end if
+        if name.indexOf(COVERAGE_SHARD_PREFIX) != 0 then
+            verdict.reason = "unexpected-file:" + name
+            return verdict
+        end if
+        if lines.len == 0 or lines[0].trim != COVERAGE_HEADER then
+            verdict.reason = "shard-header-mismatch:" + name
+            return verdict
+        end if
+        actual_shards = actual_shards + 1
+        line_number = 1
+        while line_number < lines.len
+            parts = lines[line_number].trim.split("[|]")
+            if parts.len == 1 and parts[0] == "" then
+                line_number = line_number + 1
+                continue
+            end if
+            if parts.len < 3 or (parts[0] != "P" and parts[0] != "S") then
+                verdict.reason = "malformed-record:" + name + ":" + line_number
+                return verdict
+            end if
+            seen_versions[parts[1].lower + "@" + parts[2]] = true
+            line_number = line_number + 1
+        end while
+    end for
+    if index_count != 1 then
+        verdict.reason = "index-count:" + index_count
+        return verdict
+    end if
+    if actual_shards == 0 then
+        verdict.reason = "no-coverage-shards"
+        return verdict
+    end if
+    if declared_shards < 1 then
+        verdict.reason = "index-shard-count-missing"
+        return verdict
+    end if
+    if declared_versions < 0 then
+        verdict.reason = "index-version-count-missing"
+        return verdict
+    end if
+    if declared_shards != actual_shards then
+        verdict.reason = "shard-count-mismatch:" + declared_shards + "/" + actual_shards
+        return verdict
+    end if
+    if declared_versions != seen_versions.indexes.len then
+        verdict.reason = "version-count-mismatch:" + declared_versions + "/" +
+            seen_versions.indexes.len
+        return verdict
+    end if
+    verdict.ok = true
+    verdict.reason = "accepted"
+    verdict.shards = actual_shards
+    verdict.versions = seen_versions.indexes.len
+    return verdict
+end function
+
+
+local_seed_snapshot = function()
+    result = []
+    files = globals.sync_folder.get_files
+    if typeof(files).lower != "list" then return result
+    for file in files
+        if file.name != "coverage-index.txt" and file.name.indexOf(COVERAGE_SHARD_PREFIX) != 0 then continue
+        content = file.get_content
+        if typeof(content).lower == "string" then result.push({"name": file.name, "content": content,})
+    end for
+    return result
+end function
+
+
+clear_local_seed = function()
+    files = globals.sync_folder.get_files
+    if typeof(files).lower != "list" then return
+    for file in files
+        if file.name == "coverage-index.txt" or file.name.indexOf(COVERAGE_SHARD_PREFIX) == 0 then file.delete
+    end for
+end function
+
+
+write_local_seed = function(records)
+    for record in records
+        file = touch_file(globals.sync_folder, record.name)
+        if not is_file(file) or file.set_content(record.content) != 1 then return false
+    end for
+    return true
+end function
+
+
+download_database_seed = function()
+    bundle = open_database_connection("download")
+    if typeof(bundle).lower != "map" then return false
+    remote_shell = bundle.shell
+    remote_folder = remote_shell.host_computer.File(join_path(DATABASE_REMOTE_ROOT, "sync"))
+    transfer_ok = is_file(remote_folder) and remote_folder.is_folder
+    failure_reason = "remote-sync-folder-unavailable"
+    downloaded = []
+    staged_files = []
+    validation = {"ok": false, "reason": "not-validated", "shards": 0, "versions": 0,}
+    if transfer_ok then
+        remote_files = remote_seed_files(remote_folder)
+        failure_reason = "no-seed-files"
+        if remote_files.len == 0 then transfer_ok = false
+        for remote_file in remote_files
+            if not transfer_ok then break
+            staged = globals.local_computer.File(join_path(globals.task_folder.path, remote_file.name))
+            if is_file(staged) then staged.delete
+            copied = remote_shell.scp(remote_file.path, globals.task_folder.path, globals.local_shell) == 1
+            if not copied then
+                transfer_ok = false
+                failure_reason = "scp-failed:" + remote_file.name
+                break
+            end if
+            staged = globals.local_computer.File(join_path(globals.task_folder.path, remote_file.name))
+            if not is_file(staged) then
+                transfer_ok = false
+                failure_reason = "staged-file-missing:" + remote_file.name
+                break
+            end if
+            staged_files.push(staged)
+            remote_content = remote_file.get_content
+            if typeof(remote_content).lower != "string" then
+                transfer_ok = false
+                failure_reason = "remote-content-unreadable:" + remote_file.name
+                break
+            end if
+            if staged.get_content != remote_content then
+                transfer_ok = false
+                failure_reason = "content-mismatch:" + remote_file.name
+                break
+            end if
+            downloaded.push({"name": remote_file.name, "content": remote_content,})
+        end for
+        if transfer_ok then
+            validation = coverage_seed_validation(downloaded)
+            transfer_ok = validation.ok
+            failure_reason = validation.reason
+        end if
+    end if
+    cleanup_ok = finalize_database_connection(bundle, "download")
+    for staged in staged_files
+        if is_file(staged) then staged.delete
+    end for
+    if not transfer_ok then
+        show_auto_action("SEED REJECTED", failure_reason, COLOR_RED, COLOR_ORANGE)
+        print(event_branch("PRESERVED", COLOR_GREEN,
+            "previous local seed", COLOR_GREEN))
+        diag("coverage download failed | reason=" + failure_reason + " | files=" +
+            downloaded.len + " | cleanup=" + cleanup_ok)
+        return false
+    end if
+    show_auto_action("SEED VALIDATED", "structural checks passed", COLOR_GREEN, COLOR_GREEN)
+    print(paint("  ╰ ", COLOR_DIM) + "shards=" + paint(validation.shards, COLOR_PINK) +
+        "  |  versions=" + paint(validation.versions, COLOR_PINK))
+    previous = local_seed_snapshot
+    clear_local_seed
+    if not write_local_seed(downloaded) then
+        clear_local_seed
+        write_local_seed(previous)
+        show_auto_action("SEED INSTALL FAILED", "local write failed", COLOR_RED, COLOR_RED)
+        print(event_branch("RESTORED", COLOR_GREEN,
+            "previous local seed", COLOR_GREEN))
+        diag("coverage install failed | reason=local-write-failed | restored=" + previous.len)
+        return false
+    end if
+    reset_research_memory
+    loaded = load_endpoint_research
+    diag("coverage download complete | files=" + downloaded.len + " | seed_entries=" +
+        loaded.seed + " | outbox_entries=" + loaded.outbox + " | cleanup=" + cleanup_ok)
+    show_auto_action("COVERAGE READY", "downloaded and verified", COLOR_GREEN, COLOR_GREEN)
+    print(paint("  ╰ ", COLOR_DIM) + "files=" + paint(downloaded.len, COLOR_PINK) +
+        "  |  seed=" + paint(loaded.seed, COLOR_PINK))
+    print(paint("  ╰ ", COLOR_DIM) + "outbox=" + paint(loaded.outbox, COLOR_PINK))
+    if not cleanup_ok then
+        print(event_line("DATABASE ROUTE WARNING", COLOR_ORANGE,
+            "seed refreshed; cleanup incomplete", COLOR_ORANGE))
+    end if
+    return true
+end function
+
+
+sync_database = function()
+    if not globals.authoritative_db then
+        print(event_line("DATABASE SYNC REFUSED", COLOR_RED,
+            "authoritative /root/vulndb host required", COLOR_ORANGE))
+        return false
+    end if
+    show_auto_action("DATABASE SYNC", "inbox → ACVDB3 → coverage seed",
+        COLOR_PURPLE, COLOR_ORANGE)
+    if not import_inbox then return false
+    if not export_coverage then return false
+    diag("database sync complete | inbox=merged | coverage=refreshed")
+    print(event_line("DATABASE READY", COLOR_GREEN,
+        "authoritative ACVDB3 synchronized", COLOR_GREEN))
+    return true
+end function
+
+
+should_auto_download = function(words)
+    if globals.database_role != "endpoint" or not DATABASE_AUTO_DOWNLOAD or
+        not database_configured then return false
+    if typeof(words).lower != "list" or words.len == 0 then return true
+    command = words[0].lower
+    if command == "download" or command == "upload" or command == "sync" or
+        command == "import" or command == "export" or command == "outbox" or
+        command == "status" or command == "help" or command == "?" or
+        command == "-h" or command == "--help" or command == "quit" or
+        command == "exit" or command == "q" then return false
+    return true
+end function
+
+
 show_outbox = function()
-    print(paint("AutoRecon outbox", COLOR_PURPLE))
-    print("Path: " + paint(OUTBOX_ROOT, COLOR_CYAN))
-    print("Fingerprints waiting: " + paint(globals.outbox_fingerprints.indexes.len, COLOR_ORANGE))
+    print(char(10) + event_line("AUTORECON OUTBOX", COLOR_PURPLE,
+        globals.outbox_fingerprints.indexes.len + " WAITING", COLOR_PINK))
+    print(event_branch("PATH", COLOR_PURPLE, OUTBOX_ROOT, COLOR_PURPLE))
     files = globals.outbox_folder.get_files
     if typeof(files).lower == "list" then
         for file in files
-            print("  " + file.name + "  size=" + file.size)
+            print(event_branch("SHARD", COLOR_CYAN, file.name, COLOR_CYAN) +
+                "  size=" + paint(file.size, COLOR_PINK))
         end for
     end if
 end function
 
 
+summary_pair = function(left_label, left_value, left_color, right_label, right_value, right_color)
+    print(paint("  ╰ ", COLOR_DIM) + left_label + "=" + paint(left_value, left_color) +
+        "  |  " + right_label + "=" + paint(right_value, right_color))
+end function
+
+
 show_summary = function()
-    print(char(10) + paint("AutoRecon results", COLOR_PURPLE))
-    print("Targets attempted:      " + paint(globals.stats.targets, COLOR_CYAN))
-    print("Services examined:      " + paint(globals.stats.services, COLOR_CYAN))
-    print("Library versions seen:  " + paint(globals.stats.libraries, COLOR_CYAN))
-    print("Complete versions skip: " + paint(globals.stats.complete_skips, COLOR_GREEN))
-    print("Partial versions filled:" + paint(globals.stats.partial, COLOR_ORANGE))
-    print("Unknown versions found: " + paint(globals.stats.unknown, COLOR_PURPLE))
-    print("Fresh scans completed:  " + paint(globals.stats.fresh_scans, COLOR_PURPLE))
-    print("Unique vulns added:     " + paint(globals.stats.new_vulns, COLOR_GREEN))
-    print("Overflow attempts:      " + paint(globals.stats.overflows, COLOR_PINK))
-    print("Useful object results:  " + paint(globals.stats.useful, COLOR_GREEN))
-    print("Services prefiltered:   " + paint(globals.stats.prefilter_skips, COLOR_GREEN))
-    print("Target computer cleans: " + paint(globals.stats.target_computer_clean, COLOR_ORANGE))
-    print("Target router cleans:   " + paint(globals.stats.target_router_clean, COLOR_ORANGE))
-    print("Execution host cleans:  " + paint(globals.stats.execution_computer_clean, COLOR_GREEN))
-    print("Execution router cleans:" + paint(globals.stats.execution_router_clean, COLOR_GREEN))
-    print("Residual-risk services: " + paint(globals.stats.residual, COLOR_RED))
+    print(char(10) + event_line("AUTORECON RESULTS", COLOR_PURPLE,
+        globals.focus_mode.upper, COLOR_PINK))
+    summary_pair("targets", globals.stats.targets, COLOR_PINK,
+        "services", globals.stats.services, COLOR_PINK)
+    summary_pair("library versions", globals.stats.libraries, COLOR_PINK,
+        "complete skips", globals.stats.complete_skips, COLOR_GREEN)
+    summary_pair("partial filled", globals.stats.partial, COLOR_ORANGE,
+        "unknown found", globals.stats.unknown, COLOR_PURPLE)
+    summary_pair("fresh scans", globals.stats.fresh_scans, COLOR_PURPLE,
+        "unique vulns", globals.stats.new_vulns, COLOR_GREEN)
+    summary_pair("overflow attempts", globals.stats.overflows, COLOR_PINK,
+        "useful objects", globals.stats.useful, COLOR_GREEN)
+    summary_pair("prefiltered", globals.stats.prefilter_skips, COLOR_GREEN,
+        "residual risk", globals.stats.residual, COLOR_RED)
+    print(event_line("CLEANUP SUMMARY", COLOR_ORANGE))
+    summary_pair("target computer", globals.stats.target_computer_clean, COLOR_GREEN,
+        "target router", globals.stats.target_router_clean, COLOR_GREEN)
+    summary_pair("execution host", globals.stats.execution_computer_clean, COLOR_GREEN,
+        "execution router", globals.stats.execution_router_clean, COLOR_GREEN)
     if globals.authoritative_db then
-        print("Research destination:   " + paint(VULN_DB_ROOT, COLOR_PURPLE))
+        print(event_line("RESEARCH DESTINATION", COLOR_PURPLE, VULN_DB_ROOT, COLOR_PURPLE))
     else
-        print("Research destination:   " + paint(OUTBOX_ROOT, COLOR_ORANGE))
+        print(event_line("RESEARCH DESTINATION", COLOR_PURPLE, OUTBOX_ROOT, COLOR_PURPLE))
     end if
+    print(event_branch("LATEST DIAGNOSTICS", COLOR_PURPLE,
+        LOG_ROOT + "/latest.txt", COLOR_ORANGE))
 end function
 
 
 show_status = function()
-    print(paint("AutoRecon " + SCRIPT_VERSION, COLOR_PURPLE))
-    print("Execution host: " + paint(globals.local_computer.public_ip + "/" +
-        globals.local_computer.local_ip, COLOR_CYAN))
+    print(char(10) + event_line("AUTORECON STATUS", COLOR_PURPLE, SCRIPT_VERSION, COLOR_CYAN))
     vdb_color = COLOR_ORANGE
     if globals.authoritative_db then vdb_color = COLOR_GREEN
-    print("Authoritative VDB: " + paint(globals.authoritative_db, vdb_color))
-    print("Known fingerprints: " + globals.vuln_meta.indexes.len)
-    print("Outbox fingerprints: " + globals.outbox_fingerprints.indexes.len)
-    if globals.last_locator != null then
-        print("Last exact locator: " + paint(globals.last_locator.library + " " +
-            globals.last_locator.version, COLOR_PURPLE) + " at " +
-            paint(globals.last_locator.ip + ":" + globals.last_locator.port, COLOR_CYAN))
+    print(paint("  ╰ ", COLOR_DIM) + "execution host=" +
+        paint(globals.local_computer.public_ip + "/" + globals.local_computer.local_ip, COLOR_CYAN))
+    print(paint("  ╰ ", COLOR_DIM) + "database role=" +
+        paint(globals.database_role, vdb_color) + "  |  authoritative=" +
+        paint(globals.authoritative_db, vdb_color))
+    if database_configured then
+        print(paint("  ╰ ", COLOR_DIM) + "database server=" + database_server_display)
     else
-        print("Last exact locator: " + paint("none", COLOR_ORANGE))
+        print(paint("  ╰ ", COLOR_DIM) + "database server=" +
+            paint("not configured", COLOR_ORANGE))
     end if
-    print("Locator records: " + paint(FINDING_PATH, COLOR_ORANGE))
+    print(paint("  ╰ ", COLOR_DIM) + "known fingerprints=" +
+        paint(globals.vuln_meta.indexes.len, COLOR_PINK) + "  |  outbox fingerprints=" +
+        paint(globals.outbox_fingerprints.indexes.len, COLOR_PINK))
+    if globals.last_locator != null then
+        print(event_line("LAST EXACT LOCATOR", COLOR_GREEN,
+            globals.last_locator.library + "@" + globals.last_locator.version, COLOR_CYAN))
+        print(event_branch("ENDPOINT", COLOR_CYAN,
+            globals.last_locator.ip + ":" + globals.last_locator.port, COLOR_CYAN))
+    else
+        print(event_line("LAST EXACT LOCATOR", COLOR_ORANGE, "none", COLOR_ORANGE))
+    end if
+    print(event_branch("LOCATOR RECORDS", COLOR_PURPLE, FINDING_PATH, COLOR_PURPLE))
     show_focus
 end function
 
 
 console_prompt = function()
-    mode = "OUTBOX"
-    if globals.authoritative_db then mode = "ACVDB3"
+    mode = "LOCAL"
+    if globals.database_role == "endpoint" then mode = "ENDPOINT"
+    if globals.authoritative_db then mode = "ACVDB3 MASTER"
     state = "FOCUS " + globals.focus_mode.upper
     if globals.focus_library != "" then state = state + " " + globals.focus_library
     if globals.last_locator != null then state = "FOUND " + globals.last_locator.library + "@" + globals.last_locator.version
-    print(paint("╭─◆ AUTORECON ◆─", COLOR_PURPLE) + paint("[" + mode + "]", COLOR_GREEN) +
+    print(paint("╭─◆ AUTORECON ◆─", COLOR_PURPLE) +
+        paint("[" + mode + "]", recon_state_color(mode)) +
         paint("─[" + state + "]", COLOR_PINK))
     destination = VULN_DB_ROOT
     if not globals.authoritative_db then destination = OUTBOX_ROOT
@@ -1724,24 +2648,67 @@ end function
 
 
 show_help = function()
-    print(paint("AutoRecon commands", COLOR_PURPLE))
-    print("  " + paint("hunt [count]", COLOR_GREEN) + "                       scan random public targets")
-    print("  " + paint("hunt focus <lib> [version] [count]", COLOR_GREEN) + " scan only one library family")
-    print("  " + paint("hunt focus missing [count]", COLOR_GREEN) + "         discover uncataloged exact versions")
-    print("  " + paint("target <ip> [port]", COLOR_GREEN) + "                 scan one exact target")
-    print("  " + paint("focus missing <lib> [version]", COLOR_CYAN) + "      skip completed exact versions")
-    print("  " + paint("focus <lib> [version]", COLOR_CYAN) + "              focus one library and fill gaps")
-    print("  " + paint("focus all", COLOR_CYAN) + "                          clear the library filter")
-    print("  " + paint("rescan <lib> [version]", COLOR_ORANGE) + "             force fresh scans")
-    print("  " + paint("huntlib <lib> [version] [count]", COLOR_GREEN) + "    temporary missing-version hunt")
-    print("  " + paint("coverage <lib> [version]", COLOR_PURPLE) + "          list complete and partial versions")
-    print("  " + paint("find <lib> <version> [max-attempts]", COLOR_GREEN) + " locate an exact library in the wild")
-    print("  " + paint("export", COLOR_ORANGE) + "                             write a compact coverage seed")
-    print("  " + paint("import", COLOR_ORANGE) + "                             merge synced inbox shards into ACVDB3")
-    print("  " + paint("outbox", COLOR_ORANGE) + "                             show unsynchronized research")
-    print("  " + paint("fresh", COLOR_ORANGE) + "                              reset focus and run counters only")
-    print("  " + paint("status", COLOR_CYAN) + "                             show database and focus state")
-    print("  " + paint("quit", COLOR_RED) + "                               save, clean, and exit")
+    print("")
+    print(paint("AutoRecon " + SCRIPT_VERSION, COLOR_CYAN) +
+        paint(" — vulnerability coverage and exact-library research", COLOR_DIM))
+    print(paint("AutoRecon handles ", COLOR_DIM) +
+        paint("discovery, focus, scanning, overflow research, cleanup, coverage, and sync", COLOR_GREEN))
+    print(paint("Research stays ", COLOR_DIM) +
+        paint("direct in authoritative ACVDB3", COLOR_PURPLE) + paint(" or ", COLOR_DIM) +
+        paint("durable in the endpoint outbox", COLOR_ORANGE))
+    print("")
+    print(paint("Research commands", COLOR_PURPLE))
+    print("  " + paint("hunt", COLOR_GREEN) + " " + paint("[count]", COLOR_PINK) +
+        "                       " + paint("scan random public targets", COLOR_DIM))
+    print("  " + paint("hunt focus", COLOR_GREEN) + " " +
+        paint("<lib> [version] [count]", COLOR_CYAN) + "       " +
+        paint("scan only one library family", COLOR_DIM))
+    print("  " + paint("hunt focus missing", COLOR_GREEN) + " " + paint("[count]", COLOR_PINK) +
+        "         " + paint("discover uncataloged exact versions", COLOR_DIM))
+    print("  " + paint("target", COLOR_GREEN) + " " + paint("<ip> [port]", COLOR_CYAN) +
+        "                 " + paint("scan one exact target", COLOR_DIM))
+    print("  " + paint("focus missing", COLOR_PURPLE) + " " + paint("<lib> [version]", COLOR_CYAN) +
+        "      " + paint("skip completed exact versions", COLOR_DIM))
+    print("  " + paint("focus", COLOR_PURPLE) + " " + paint("<lib> [version]", COLOR_CYAN) +
+        "              " + paint("focus one library and fill gaps", COLOR_DIM))
+    print("  " + paint("focus all", COLOR_PURPLE) +
+        "                          " + paint("clear the library filter", COLOR_DIM))
+    print("  " + paint("rescan", COLOR_ORANGE) + " " + paint("<lib> [version]", COLOR_CYAN) +
+        "             " + paint("force fresh scans", COLOR_DIM))
+    print("  " + paint("huntlib", COLOR_GREEN) + " " + paint("<lib> [version] [count]", COLOR_CYAN) +
+        "    " + paint("temporary missing-version hunt", COLOR_DIM))
+    print("  " + paint("coverage", COLOR_PURPLE) + " " + paint("<lib> [version]", COLOR_CYAN) +
+        "          " + paint("list complete and partial versions", COLOR_DIM))
+    print("  " + paint("find", COLOR_GREEN) + " " +
+        paint("<lib> <version> [max-attempts]", COLOR_CYAN) + " " +
+        paint("locate an exact public library", COLOR_DIM))
+    print("")
+    print(paint("Database and console", COLOR_PURPLE))
+    print("  " + paint("download", COLOR_CYAN) +
+        "  " + paint("refresh the endpoint coverage seed", COLOR_DIM))
+    print("  " + paint("upload", COLOR_ORANGE) +
+        "    " + paint("send verified outbox shards to Server B", COLOR_DIM))
+    print("  " + paint("sync", COLOR_PURPLE) +
+        "      " + paint("merge inbox and rebuild authoritative coverage", COLOR_DIM))
+    print("  " + paint("export", COLOR_ORANGE) +
+        "    " + paint("rebuild the authoritative coverage seed", COLOR_DIM))
+    print("  " + paint("import", COLOR_ORANGE) +
+        "    " + paint("compatibility alias for sync", COLOR_DIM))
+    print("  " + paint("outbox", COLOR_ORANGE) +
+        "    " + paint("show unsynchronized research", COLOR_DIM))
+    print("  " + paint("fresh", COLOR_ORANGE) +
+        "     " + paint("reset focus and run counters only", COLOR_DIM))
+    print("  " + paint("status", COLOR_CYAN) +
+        "    " + paint("show database, locator, and focus state", COLOR_DIM))
+    print("  " + paint("help", COLOR_PURPLE) +
+        "      " + paint("show this guide", COLOR_DIM))
+    print("  " + paint("quit", COLOR_RED) +
+        "      " + paint("save, clean, and exit", COLOR_DIM))
+end function
+
+
+usage_line = function(usage)
+    return event_line("USAGE", COLOR_RED, usage, COLOR_ORANGE)
 end function
 
 
@@ -1751,21 +2718,22 @@ dispatch = function(words)
     if command == "hunt" then
         if words.len > 1 and words[1].lower == "focus" then
             if words.len < 3 then
-                print(paint("Usage: hunt focus <library> [version] [count]", COLOR_RED))
-                print(paint("   or: hunt focus missing [count]", COLOR_RED))
+                print(usage_line("hunt focus <library> [version] [count]"))
+                print(event_branch("OR", COLOR_ORANGE,
+                    "hunt focus missing [count]", COLOR_ORANGE))
                 return false
             end if
             if words[2].lower == "missing" then
                 count = DEFAULT_HUNT_COUNT
                 if words.len > 3 then
                     if not digits_only(words[3]) then
-                        print(paint("Usage: hunt focus missing [count]", COLOR_RED))
+                        print(usage_line("hunt focus missing [count]"))
                         return false
                     end if
                     count = words[3].to_int
                 end if
                 if words.len > 4 then
-                    print(paint("Usage: hunt focus missing [count]", COLOR_RED))
+                    print(usage_line("hunt focus missing [count]"))
                     return false
                 end if
                 return hunt_with_focus("discover", "", "", count)
@@ -1778,13 +2746,13 @@ dispatch = function(words)
             end if
             if words.len > 4 then
                 if not digits_only(words[4]) then
-                    print(paint("Usage: hunt focus <library> [version] [count]", COLOR_RED))
+                    print(usage_line("hunt focus <library> [version] [count]"))
                     return false
                 end if
                 count = words[4].to_int
             end if
             if words.len > 5 then
-                print(paint("Usage: hunt focus <library> [version] [count]", COLOR_RED))
+                print(usage_line("hunt focus <library> [version] [count]"))
                 return false
             end if
             return hunt_with_focus("missing", library, version, count)
@@ -1794,7 +2762,7 @@ dispatch = function(words)
         return hunt(count)
     else if command == "target" then
         if words.len < 2 or not is_valid_ip(words[1]) then
-            print(paint("Usage: target <ip> [port]", COLOR_RED))
+            print(usage_line("target <ip> [port]"))
             return false
         end if
         port = 0
@@ -1815,7 +2783,7 @@ dispatch = function(words)
         end if
         if words[1].lower == "missing" then
             if words.len < 3 then
-                print(paint("Usage: focus missing <library> [version]", COLOR_RED))
+                print(usage_line("focus missing <library> [version]"))
                 return false
             end if
             version = ""
@@ -1829,7 +2797,7 @@ dispatch = function(words)
         return true
     else if command == "rescan" then
         if words.len < 2 then
-            print(paint("Usage: rescan <library> [version]", COLOR_RED))
+            print(usage_line("rescan <library> [version]"))
             return false
         end if
         version = ""
@@ -1838,7 +2806,7 @@ dispatch = function(words)
         return true
     else if command == "huntlib" then
         if words.len < 2 then
-            print(paint("Usage: huntlib <library> [version] [count]", COLOR_RED))
+            print(usage_line("huntlib <library> [version] [count]"))
             return false
         end if
         library = words[1]
@@ -1851,7 +2819,7 @@ dispatch = function(words)
         return hunt_with_focus("missing", library, version, count)
     else if command == "coverage" then
         if words.len < 2 then
-            print(paint("Usage: coverage <library> [version]", COLOR_RED))
+            print(usage_line("coverage <library> [version]"))
             return false
         end if
         version = ""
@@ -1860,22 +2828,29 @@ dispatch = function(words)
         return true
     else if command == "find" then
         if words.len < 3 or words.len > 4 then
-            print(paint("Usage: find <library> <version> [max-attempts]", COLOR_RED))
+            print(usage_line("find <library> <version> [max-attempts]"))
             return false
         end if
         attempts = 0
         if words.len > 3 then
             if not digits_only(words[3]) then
-                print(paint("Maximum attempts must be a whole number.", COLOR_RED))
+                print(event_line("LOCATOR REFUSED", COLOR_RED,
+                    "maximum attempts must be a whole number", COLOR_ORANGE))
                 return false
             end if
             attempts = words[3].to_int
         end if
         return find_exact_library(words[1], words[2], attempts)
+    else if command == "download" then
+        return download_database_seed
+    else if command == "upload" then
+        return upload_outbox
+    else if command == "sync" then
+        return sync_database
     else if command == "export" then
         return export_coverage
     else if command == "import" then
-        return import_inbox
+        return sync_database
     else if command == "outbox" then
         show_outbox
         return true
@@ -1894,7 +2869,7 @@ dispatch = function(words)
     else if command == "quit" or command == "exit" or command == "q" then
         return false
     end if
-    print(paint("Unknown command. Type help.", COLOR_RED))
+    print(event_line("UNKNOWN COMMAND", COLOR_RED, "type help", COLOR_ORANGE))
     return true
 end function
 
@@ -1911,29 +2886,49 @@ globals.last_locator = null
 globals.locator_last_version = "none"
 reset_stats
 
-if typeof(globals.metaxploit).lower != "metaxploitlib" then exit("MetaSploit provider unavailable.")
-if not init_layout then exit("AutoRecon could not create /root/autoscripts/autorecon.")
-if not init_log then exit("AutoRecon diagnostic log unavailable.")
-init_vulns
-load_focus
+if typeof(globals.metaxploit).lower != "metaxploitlib" then
+    exit(fatal_line("MetaSploit provider unavailable."))
+end if
+if not init_layout then exit(fatal_line("Could not create /root/autoscripts/autorecon."))
+if not init_log then exit(fatal_line("Diagnostic log unavailable."))
+
+startup_words = []
+for word in params
+    if word.trim != "" then startup_words.push(word.trim)
+end for
 
 show_banner
-print(paint("AutoRecon " + SCRIPT_VERSION, COLOR_PURPLE))
-print("Logs: " + paint(LOG_ROOT + "/latest.txt", COLOR_ORANGE))
-if globals.authoritative_db then
-    print("Research mode: " + paint("direct ACVDB3", COLOR_GREEN))
-else
-    print("Research mode: " + paint("endpoint outbox", COLOR_ORANGE))
+print(event_line("TASK QUEUE", COLOR_PURPLE, TASK_ROOT, COLOR_ORANGE))
+print(event_line("DIAGNOSTICS", COLOR_PURPLE, LOG_ROOT, COLOR_ORANGE))
+print(event_line("RESEARCH OUTBOX", COLOR_PURPLE, OUTBOX_ROOT, COLOR_ORANGE))
+
+entered_pin = user_input(recon_pin_signature, 1)
+if PIN != "" then
+    if entered_pin != PIN then exit(fatal_line("Incorrect PIN."))
 end if
+
+init_vulns
+load_focus
+if globals.authoritative_db then
+    print(event_line("SHARED ACVDB3", COLOR_GREEN, VULN_DB_ROOT, COLOR_PURPLE))
+    print(event_branch("DATABASE ROLE", COLOR_GREEN,
+        "authoritative master", COLOR_GREEN))
+else if globals.database_role == "endpoint" then
+    print(event_line("COVERAGE SEED", COLOR_PURPLE, SYNC_ROOT, COLOR_PURPLE))
+    print(event_branch("DATABASE ROLE", COLOR_ORANGE, "endpoint outbox", COLOR_ORANGE))
+    print(paint("  ╰ DATABASE SERVER", COLOR_CYAN) + "  " + database_server_display)
+else
+    print(event_line("COVERAGE SEED", COLOR_PURPLE, SYNC_ROOT, COLOR_PURPLE))
+    print(event_branch("DATABASE ROLE", COLOR_ORANGE,
+        "standalone outbox", COLOR_ORANGE))
+end if
+if should_auto_download(startup_words) then download_database_seed
 show_focus
 
-if params.len > 0 then
-    words = []
-    for word in params
-        if word.trim != "" then words.push(word.trim)
-    end for
-    dispatch(words)
+if startup_words.len > 0 then
+    dispatch(startup_words)
     save_research
+    if is_file(globals.execution_computer_source) then clean_execution_route
     flush_log
     exit
 end if
@@ -1955,5 +2950,6 @@ end while
 save_research
 if is_file(globals.execution_computer_source) then clean_execution_route
 flush_log
-print(paint("AutoRecon closed.", COLOR_PURPLE))
+print(event_line("AUTORECON CLOSED", COLOR_GREEN,
+    "research saved and execution cleanup attempted", COLOR_GREEN))
 exit

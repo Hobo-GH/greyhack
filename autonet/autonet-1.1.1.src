@@ -1,0 +1,1966 @@
+//Made By Hobo & Rowan
+// AutoNet 1.1.1 SSH node hunter for Grey Hack Public v0.9.6773.
+//
+// Run AutoNet on the final owned server opened by AutoRoute. It finds public
+// SSH services, reuses the shared ACVDB3 vulnerability database, proves a
+// reusable root login, requires target-computer and execution-route cleanup,
+// and records best-effort target-router cleanup before admitting the node.
+// Version 1.1.1 preserves the field-proven 1.0.0 recruitment engine and adds
+// the Auto Family PIN, circuit, guide, prompt, event, diagnostic, and summary
+// language without changing its node, denylist, ACVDB3, or cleanup contracts.
+
+SCRIPT_VERSION = "1.1.1"
+
+AUTOSCRIPTS_ROOT = "/root/autoscripts"
+APP_ROOT = "/root/autoscripts/autonet"
+NODE_ROOT = "/root/autoscripts/autonet/nodes"
+NODE_INDEX_PATH = "/root/autoscripts/autonet/nodes/index.txt"
+NODE_DENYLIST_PATH = "/root/autoscripts/autonet/nodes/denylist.txt"
+LOG_ROOT = "/root/autoscripts/autonet/logs"
+
+NODE_INDEX_HEADER = "ANNODEINDEX1"
+NODE_SHARD_HEADER = "ANNODES1"
+NODE_DENY_HEADER = "ANDENY1"
+NODE_SHARD_PREFIX = "ssh-"
+NODE_SHARD_LIMIT = 100000
+
+VULN_DB_ROOT = "/root/vulndb"
+VULN_DB_INDEX_PATH = "/root/vulndb/index.txt"
+VULN_DB_INDEX_HEADER = "ACVDBINDEX3"
+VULN_DB_SHARD_PREFIX = "shard-"
+VULN_DB_SHARD_LIMIT = 120000
+VULN_DB_SOURCE = "autonet"
+
+DEFAULT_GOAL = 5
+DEFAULT_BUDGET = 500
+MAX_GOAL = 50
+MAX_BUDGET = 10000
+MAX_RESULTS_PER_SERVICE = 24
+HELPER_WAIT_SECONDS = 60
+FINALIZER_WAIT_SECONDS = 2
+ROOT_PASSWORD_INJECT = "an2026"
+PIN = ""
+
+// Development behavior. Unknown SSH libraries are scanned and added to the
+// shared ACVDB3 database. Disable this to use known vulnerability records only.
+LEARN_UNKNOWN_LIBRARIES = true
+
+// The target computer must always be cleaned. Target-router cleanup remains
+// best-effort because the verified clean execution route is the owned chain
+// break; its actual result is stored on every admitted node.
+REQUIRE_TARGET_ROUTER_CLEAN = false
+REQUIRE_EXECUTION_ROUTER_CLEAN = true
+
+COLOR_PURPLE = "#D86CFF"
+COLOR_CYAN = "#55E7FF"
+COLOR_GREEN = "#63FF9B"
+COLOR_RED = "#FF5C7C"
+COLOR_ORANGE = "#FFB86B"
+COLOR_PINK = "#FF79C6"
+COLOR_LAVENDER = "#C7A7E8"
+COLOR_DIM = "#A79BC8"
+
+
+paint = function(value, color)
+	return "<color=" + color + ">" + str(value) + "</color>"
+end function
+
+
+event_line = function(label, label_color, detail = "", detail_color = "")
+	if detail_color == "" then detail_color = COLOR_LAVENDER
+	line = paint("◆ " + label, label_color)
+	if detail != "" then line = line + "  " + paint(detail, detail_color)
+	return line
+end function
+
+
+event_branch = function(label, label_color, detail = "", detail_color = "")
+	if detail_color == "" then detail_color = COLOR_LAVENDER
+	line = paint("  ╰ " + label, label_color)
+	if detail != "" then line = line + "  " + paint(detail, detail_color)
+	return line
+end function
+
+
+cleanup_state_color = function(value)
+	lowered = str(value).lower
+	if lowered == "yes" or lowered == "true" or lowered == "1" or lowered == "clean" then
+		return COLOR_GREEN
+	end if
+	if lowered == "no" or lowered == "false" or lowered == "0" then return COLOR_RED
+	return COLOR_ORANGE
+end function
+
+
+autonet_heading = function(title, detail = "")
+	line = char(10) + paint("◆ " + title, COLOR_PURPLE)
+	if detail != "" then line = line + "  " + paint(detail, COLOR_CYAN)
+	print line
+end function
+
+
+fatal_line = function(message)
+	return paint("AUTONET REFUSED", COLOR_RED) + " | " + paint(message, COLOR_ORANGE)
+end function
+
+
+autonet_state_color = function(state)
+	lowered = state.lower
+	if lowered.indexOf("ready") != null or lowered.indexOf("verified") != null or
+		lowered.indexOf("complete") != null then return COLOR_GREEN
+	if lowered.indexOf("failed") != null or lowered.indexOf("refused") != null then return COLOR_RED
+	if lowered.indexOf("remove") != null or lowered.indexOf("deny") != null or
+		lowered.indexOf("login") != null or lowered.indexOf("setup") != null then return COLOR_ORANGE
+	return COLOR_PINK
+end function
+
+
+autonet_input_signature = function(state, destination_label, destination, destination_color = "")
+	if destination_color == "" then destination_color = COLOR_CYAN
+	origin = "NO ORIGIN"
+	if is_computer(globals.local_computer) then
+		origin = globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+	end if
+	if destination == "" then destination = "NO TARGET"
+	top = paint("╭─◆ AUTONET ◆─", COLOR_PURPLE) +
+		paint("[" + state + "]", autonet_state_color(state))
+	bottom = paint("╰─", COLOR_PURPLE) + paint("ORIGIN ", COLOR_ORANGE) +
+		paint(origin, COLOR_CYAN) + paint(" ─▶ ", COLOR_GREEN) +
+		paint(destination_label + " ", COLOR_PINK) + paint(destination, destination_color) +
+		paint(" ─▶ ", COLOR_GREEN)
+	return top + char(10) + bottom
+end function
+
+
+autonet_pin_signature = function()
+	origin = "NO ORIGIN"
+	if is_computer(globals.local_computer) then
+		origin = globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+	end if
+	top = paint("╭─◆ AUTONET ◆─", COLOR_PURPLE) + paint("[PIN REQUIRED]", COLOR_ORANGE)
+	bottom = paint("╰─", COLOR_PURPLE) + paint("ORIGIN ", COLOR_ORANGE) +
+		paint(origin, COLOR_CYAN) + paint(" ─▶ ", COLOR_GREEN) +
+		paint("ENTER PIN", COLOR_PINK) + paint(" ─▶ ", COLOR_GREEN)
+	return top + char(10) + bottom
+end function
+
+
+show_autonet_circuit = function()
+	print ""
+	print "         " + paint("◆─────────────◆", COLOR_CYAN)
+	print "        " + paint("╱", COLOR_PURPLE) + " " + paint("╲", COLOR_CYAN) +
+		"            " + paint("│", COLOR_CYAN)
+	print paint("◆──────◆", COLOR_PURPLE) + "   " + paint("╲", COLOR_GREEN) +
+		"      " + paint("╭────┴───────╮", COLOR_PURPLE)
+	print "        " + paint("╲", COLOR_ORANGE) + "   " + paint("◆─────┤", COLOR_GREEN) +
+		paint("  AUTONET  ", COLOR_PINK) + paint(" ├────◆", COLOR_CYAN)
+	print "         " + paint("╲ ╱", COLOR_PURPLE) + "      " +
+		paint("╰─────┬───┬──╯", COLOR_PURPLE)
+	print "          " + paint("◆─────────────◆", COLOR_CYAN) +
+		paint("   │", COLOR_GREEN)
+	print "                " + paint("◆── VERIFY ─┴─ STORE ──◆", COLOR_GREEN)
+	print "                    " + paint("HUNT", COLOR_PURPLE) + "   " +
+		paint("ADMIT", COLOR_GREEN) + "   " + paint("DENY", COLOR_ORANGE)
+	print paint("ROWAN CIRCUIT // ", COLOR_PURPLE) + paint(SCRIPT_VERSION, COLOR_CYAN)
+end function
+
+
+show_autonet_help = function()
+	print ""
+	print paint("AutoNet ", COLOR_PURPLE) + paint(SCRIPT_VERSION, COLOR_CYAN) +
+		paint(" — verified SSH node recruitment", COLOR_DIM)
+	print paint("AutoNet handles ", COLOR_DIM) +
+		paint("discovery, ACVDB3, root proof, cleanup, admission, storage, and denial", COLOR_GREEN)
+	print paint("A node is saved only after ", COLOR_DIM) +
+		paint("reusable root SSH and the mandatory cleanup gates", COLOR_ORANGE)
+	print ""
+	print paint("Commands", COLOR_PURPLE)
+	print "  " + paint("hunt [goal] [budget]", COLOR_GREEN) + "  " +
+		paint("recruit verified SSH nodes", COLOR_DIM)
+	print "  " + paint("nodes", COLOR_CYAN) + "                 " +
+		paint("list stored nodes without passwords", COLOR_DIM)
+	print "  " + paint("remove [index]", COLOR_ORANGE) + "        " +
+		paint("remove every matching record and deny its IP", COLOR_DIM)
+	print "  " + paint("deny <ip>", COLOR_ORANGE) + "             " +
+		paint("deny one public IP without attacking it", COLOR_DIM)
+	print "  " + paint("help", COLOR_PURPLE) + "                  " +
+		paint("show this guide", COLOR_DIM)
+	print ""
+	print paint("Limits", COLOR_PURPLE)
+	print "  " + paint("goal 1-" + MAX_GOAL, COLOR_PINK) + "             " +
+		paint("verified nodes wanted", COLOR_DIM)
+	print "  " + paint("budget 1-" + MAX_BUDGET, COLOR_PINK) + "       " +
+		paint("random public candidates allowed", COLOR_DIM)
+	print "  " + paint("target router", COLOR_ORANGE) + "         " +
+		paint("best effort; real cleanup state is stored", COLOR_DIM)
+end function
+
+
+attack_technique = function(argument, entry)
+	if argument == "__AN_PLAIN__" then return "plain overflow"
+	if argument == ROOT_PASSWORD_INJECT then return "credential payload"
+	if entry.mode != "" and entry.mode != "unknown" then return entry.mode + " payload"
+	return "adaptive payload"
+end function
+
+
+show_attack_event = function(entry, technique)
+	globals.visual_attack_index = globals.visual_attack_index + 1
+	print paint("◆ ATTACK ", COLOR_PURPLE) +
+		paint("[" + globals.visual_attack_index + "]", COLOR_PINK) + "  " +
+		paint(entry.lib + "@" + entry.version, COLOR_CYAN) + "  " +
+		paint(technique, COLOR_ORANGE)
+end function
+
+
+show_attack_result = function(result)
+	if result == null then
+		print event_branch("NO USABLE RESULT", COLOR_RED, "null", COLOR_RED)
+		return
+	end if
+	kind = typeof(result).lower
+	if kind == "number" then
+		print event_branch("PAYLOAD ACCEPTED", COLOR_GREEN, "numeric return", COLOR_PINK)
+		return
+	end if
+	authority = access_level(result)
+	if kind == "shell" or kind == "ftpshell" then
+		print paint("  ╰ ACCESS RETAINED", COLOR_GREEN) + "  " + paint(kind, COLOR_CYAN) +
+			"  authority=" + paint(authority, COLOR_PINK)
+		return
+	end if
+	if kind == "computer" or kind == "file" then
+		print paint("  ╰ OBJECT RETAINED", COLOR_GREEN) + "  " + paint(kind, COLOR_CYAN) +
+			"  authority=" + paint(authority, COLOR_PINK)
+		return
+	end if
+	print event_branch("NO USABLE RESULT", COLOR_RED, kind, COLOR_RED)
+end function
+
+
+join_path = function(folder, name)
+	if folder == "/" then return "/" + name
+	if folder[-1] == "/" then return folder + name
+	return folder + "/" + name
+end function
+
+
+is_file = function(value)
+	return typeof(value).lower == "file"
+end function
+
+
+is_shell = function(value)
+	return typeof(value).lower == "shell"
+end function
+
+
+is_computer = function(value)
+	return typeof(value).lower == "computer"
+end function
+
+
+is_session = function(value)
+	return typeof(value).lower == "netsession"
+end function
+
+
+is_meta_lib = function(value)
+	return typeof(value).lower == "metalib"
+end function
+
+
+is_exploit_object = function(value)
+	kind = typeof(value).lower
+	return kind == "shell" or kind == "computer" or kind == "file"
+end function
+
+
+add_unique = function(values, value)
+	if typeof(value).lower != "string" then return 
+	if value == "" then return 
+	if values.indexOf(value) == null then values.push(value)
+end function
+
+
+safe_field = function(value)
+	if typeof(value).lower != "string" then return false
+	if value.indexOf("|") != null then return false
+	if value.indexOf(char(10)) != null then return false
+	if value.indexOf(char(13)) != null then return false
+	return true
+end function
+
+
+db_field = function(value)
+	cleaned = str(value).replace("[|]", "/")
+	cleaned = cleaned.replace(char(10), " ")
+	cleaned = cleaned.replace(char(13), " ")
+	return cleaned.trim
+end function
+
+
+path_component = function(value)
+	cleaned = db_field(value)
+	cleaned = cleaned.replace("[/]", "_")
+	cleaned = cleaned.replace("[:]", "_")
+	cleaned = cleaned.replace(" ", "_")
+	cleaned = cleaned.replace("@", "_")
+	if cleaned == "" then cleaned = "unknown"
+	return cleaned
+end function
+
+
+pad4 = function(number)
+	digits = str(number)
+	while digits.len < 4
+		digits = "0" + digits
+	end while
+	return digits
+end function
+
+
+ensure_folder_path = function(path)
+	computer = globals.local_computer
+	current = "/"
+	for part in path.split("/")
+		part = part.trim
+		if part == "" then continue
+		next_path = join_path(current, part)
+		item = computer.File(next_path)
+		if is_file(item) then
+			if not item.is_folder then return null
+		else
+			if computer.create_folder(current, part) != 1 then return null
+			item = computer.File(next_path)
+			if not is_file(item) or not item.is_folder then return null
+		end if
+		current = next_path
+	end for
+	return computer.File(path)
+end function
+
+
+touch_file = function(folder, name)
+	if not is_file(folder) then return null
+	path = join_path(folder.path, name)
+	file = globals.local_computer.File(path)
+	if is_file(file) then return file
+	if globals.local_computer.touch(folder.path, name) != 1 then return null
+	return globals.local_computer.File(path)
+end function
+
+
+init_storage = function
+	globals.app_folder = ensure_folder_path(APP_ROOT)
+	globals.node_folder = ensure_folder_path(NODE_ROOT)
+	globals.log_folder = ensure_folder_path(LOG_ROOT)
+	globals.vuln_folder = ensure_folder_path(VULN_DB_ROOT)
+	if not is_file(globals.app_folder) then return false
+	if not is_file(globals.node_folder) then return false
+	if not is_file(globals.log_folder) then return false
+	if not is_file(globals.vuln_folder) then return false
+	return true
+end function
+
+
+semantic_diag_color = function(key, value, context)
+	key_lower = key.lower
+	value_lower = value.lower
+	context_lower = context.lower
+
+	if value_lower.indexOf("failed") != null or value_lower.indexOf("rejected") != null or
+		value_lower.indexOf("refused") != null or value_lower.indexOf("unavailable") != null or
+		value_lower.indexOf("denied") != null or value_lower.indexOf("invalid") != null or
+		value_lower.indexOf("exhausted") != null or value_lower.indexOf("not proven") != null or
+		value_lower.indexOf("no vulnerability") != null then return COLOR_RED
+	if key_lower.indexOf("risk") != null then
+		if value_lower == "true" or value_lower == "1" or value_lower == "yes" then return COLOR_RED
+		return COLOR_GREEN
+	end if
+	if key_lower == "computer" or key_lower == "router" or
+		key_lower == "target" or key_lower == "execution" or
+		key_lower.indexOf("target_computer") != null or
+		key_lower.indexOf("target_router") != null then
+		if value_lower == "true" or value_lower == "1" or value_lower == "yes" or
+			value_lower == "clean" or value_lower == "complete" then return COLOR_GREEN
+		if value_lower == "false" or value_lower == "0" or value_lower == "no" then return COLOR_RED
+	end if
+	if value_lower == "yes" or value_lower == "true" or value_lower == "success" or
+		value_lower == "ready" or value_lower == "complete" or value_lower == "completed" or
+		value_lower == "accepted" or value_lower == "retained" or value_lower == "verified" or
+		value_lower == "admitted" or value_lower == "saved" or value_lower == "staged" or
+		value_lower == "clean" then return COLOR_GREEN
+	if value_lower == "no" or value_lower == "false" or value_lower == "unknown" or
+		value_lower == "missing" or value_lower == "skipped" or
+		value_lower == "cancelled" or value_lower == "best-effort" then return COLOR_ORANGE
+
+	if key_lower.indexOf("authority") != null or key_lower.indexOf("user") != null or
+		key_lower.indexOf("password") != null or key_lower.indexOf("index") != null or
+		key_lower.indexOf("node") != null or key_lower.indexOf("denied") != null or
+		key_lower.indexOf("candidate") != null or key_lower.indexOf("entries") != null or
+		key_lower.indexOf("bucket") != null or key_lower == "value" then return COLOR_PINK
+	if key_lower.indexOf("host") != null or key_lower.indexOf("endpoint") != null or
+		key_lower.indexOf("ip") != null or key_lower.indexOf("port") != null or
+		key_lower.indexOf("library") != null or key_lower.indexOf("service") != null or
+		key_lower.indexOf("schema") != null or key_lower == "type" or
+		key_lower == "kind" then return COLOR_CYAN
+	if key_lower.indexOf("path") != null or key_lower.indexOf("file") != null or
+		key_lower.indexOf("folder") != null then
+		if context_lower.indexOf("log") != null or context_lower.indexOf("cleanup") != null then
+			return COLOR_ORANGE
+		end if
+		return COLOR_PURPLE
+	end if
+	if key_lower.indexOf("vuln") != null or key_lower.indexOf("overflow") != null or
+		key_lower.indexOf("region") != null then return COLOR_PURPLE
+	if key_lower.indexOf("mode") != null or key_lower.indexOf("source") != null or
+		key_lower.indexOf("reason") != null or key_lower.indexOf("policy") != null or
+		key_lower.indexOf("chain") != null or key_lower.indexOf("info") != null then
+		return COLOR_ORANGE
+	end if
+	if key_lower.indexOf("count") != null or key_lower.indexOf("attempt") != null or
+		key_lower.indexOf("buckets") != null then return COLOR_PINK
+	return COLOR_DIM
+end function
+
+
+semantic_diag_field = function(field, context)
+	cleaned = field.trim
+	if cleaned == "" then return ""
+	equals = cleaned.indexOf("=")
+	if equals == null then return paint(cleaned, semantic_diag_color("", cleaned, context))
+	key = cleaned[:equals].trim
+	value = cleaned[equals + 1:].trim
+	return key.replace("_", " ") + "=" + paint(value, semantic_diag_color(key, value, context))
+end function
+
+
+semantic_diag_lead = function(lead)
+	cleaned = lead.trim
+	lowered = cleaned.lower
+	if cleaned == "" then return ""
+	if lowered.indexOf("overflow cached ") == 0 then
+		mode_at = lowered.indexOf(" mode=")
+		if mode_at != null then
+			address = cleaned["overflow cached ".len:mode_at].trim
+			mode = cleaned[mode_at + " mode=".len:].trim
+			return paint("overflow cached", COLOR_PURPLE) + "  " +
+				paint(address, COLOR_PURPLE) + "  mode=" + paint(mode, COLOR_ORANGE)
+		end if
+	end if
+	if lowered.indexOf("failed") != null or lowered.indexOf("rejected") != null or
+		lowered.indexOf("refused") != null or lowered.indexOf("unavailable") != null or
+		lowered.indexOf("exhausted") != null or lowered.indexOf("residual") != null then
+		return paint(cleaned, COLOR_RED)
+	end if
+	if lowered.indexOf("complete") != null or lowered.indexOf("ready") != null or
+		lowered.indexOf("verified") != null or lowered.indexOf("admitted") != null or
+		lowered.indexOf("success") != null or lowered.indexOf("clean") != null then
+		return paint(cleaned, COLOR_GREEN)
+	end if
+	if lowered.indexOf("cleanup") != null or lowered.indexOf("deny") != null or
+		lowered.indexOf("remove") != null then return paint(cleaned, COLOR_ORANGE)
+	if lowered.indexOf("vuln") == 0 or lowered.indexOf("scan") == 0 then
+		return paint(cleaned, COLOR_PURPLE)
+	end if
+	if lowered.indexOf("ssh") == 0 or lowered.indexOf("candidate") == 0 then
+		return paint(cleaned, COLOR_CYAN)
+	end if
+	return paint(cleaned, COLOR_DIM)
+end function
+
+
+terminal_diag_line = function(message, line)
+	parts = message.split("[|]")
+	lead = parts[0].trim
+	lowered = lead.lower
+	badge = paint("[ACLOG " + globals.log_seq + "]", COLOR_DIM)
+	label = "EVENT"
+	label_color = COLOR_PURPLE
+
+	if lowered.indexOf("startup") != null then
+		label = "STARTUP"
+	else if lowered.indexOf("execution log") != null or lowered.indexOf("target cleanup") != null then
+		label = "CLEANUP"
+		label_color = COLOR_ORANGE
+	else if lowered.indexOf("target router cleanup unavailable") != null or
+		lowered.indexOf("residual target risk") != null then
+		label = "RESIDUAL RISK"
+		label_color = COLOR_RED
+	else if lowered.indexOf("node admitted") != null then
+		label = "NODE ADMITTED"
+		label_color = COLOR_GREEN
+	else if lowered.indexOf("node rejected") != null or
+		lowered.indexOf("node admission failed") != null or
+		lowered.indexOf("candidate rejected") != null then
+		label = "NODE REJECTED"
+		label_color = COLOR_RED
+	else if lowered.indexOf("ssh candidate") != null then
+		label = "ENDPOINT PROBE"
+	else if lowered.indexOf("vuln scan") != null or lowered.indexOf("vuln use") != null or
+		lowered.indexOf("overflow cached") != null then
+		label = "VULNERABILITY"
+	else if lowered.indexOf("vuln db") != null or lowered.indexOf("vuln bucket") != null then
+		label = "COVERAGE"
+	end if
+
+	if lowered.indexOf("failed") != null or lowered.indexOf("rejected") != null or
+		lowered.indexOf("refused") != null then label_color = COLOR_RED
+	output = paint("◆ " + label, label_color) + "  " + badge
+	lead_output = semantic_diag_lead(lead)
+	if lead_output != "" then output = output + "  " + lead_output
+
+	branch = ""
+	fields_on_branch = 0
+	if parts.len > 1 then
+		for index in range(1, parts.len - 1)
+			field_output = semantic_diag_field(parts[index], lead)
+			if field_output == "" then continue
+			if fields_on_branch == 0 then
+				branch = paint("  ╰ ", COLOR_DIM) + field_output
+			else
+				branch = branch + "  |  " + field_output
+			end if
+			fields_on_branch = fields_on_branch + 1
+			if fields_on_branch == 2 then
+				output = output + char(10) + branch
+				branch = ""
+				fields_on_branch = 0
+			end if
+		end for
+	end if
+	if fields_on_branch > 0 then output = output + char(10) + branch
+	return output
+end function
+
+
+init_log = function
+	globals.log_seq = 0
+	globals.log_pending = []
+	globals.log_file = touch_file(globals.log_folder, "latest.txt")
+	if not is_file(globals.log_file) then return false
+	header = "AutoNet diagnostic log" + char(10) + "version=" + SCRIPT_VERSION + char(10) + "started=" + current_date + char(10) + "execution_host=" + globals.local_computer.public_ip + "/" + globals.local_computer.local_ip
+	return globals.log_file.set_content(header) == 1
+end function
+
+
+flush_log = function
+	if not is_file(globals.log_file) then return false
+	if globals.log_pending.len == 0 then return true
+	content = globals.log_file.get_content
+	if typeof(content).lower != "string" then return false
+	if globals.log_file.set_content(content + char(10) + globals.log_pending.join(char(10))) != 1 then return false
+	globals.log_pending = []
+	return true
+end function
+
+
+diag = function(message)
+	globals.log_seq = globals.log_seq + 1
+	line = "[ACLOG " + globals.log_seq + "] " + message
+	print terminal_diag_line(message, line)
+	globals.log_pending.push line
+	if globals.log_pending.len >= 10 then flush_log
+end function
+
+
+diag_value = function(stage, value)
+	kind = typeof(value).lower
+	if kind == "shell" or kind == "ftpshell" or kind == "computer" then
+		computer = value
+		if kind == "shell" or kind == "ftpshell" then computer = value.host_computer
+		if not is_computer(computer) then
+			diag(stage + " | type=" + kind + " | computer=unavailable")
+			return
+		end if
+		diag(stage + " | type=" + kind +
+			" | host=" + computer.public_ip + "/" + computer.local_ip +
+			" | authority=" + access_level(value))
+		return
+	end if
+	if kind == "file" then
+		diag(stage + " | type=file | path=" + value.path +
+			" | authority=" + access_level(value))
+		return
+	end if
+	if kind == "number" then
+		diag(stage + " | type=number | value=" + value)
+		return
+	end if
+	if kind == "string" then
+		text = value.replace(char(13), " ").replace(char(10), " ")
+		if text.len > 300 then text = text[:300] + "..."
+		diag(stage + " | type=string | text=" + text)
+		return
+	end if
+	diag(stage + " | type=" + kind)
+end function
+
+
+node_key = function(node)
+	return node.ip + ":" + node.port + "|" + node.user
+end function
+
+
+node_shard_name = function(number)
+	return NODE_SHARD_PREFIX + pad4(number) + ".txt"
+end function
+
+
+load_node_index = function
+	globals.node_shard_count = 0
+	file = globals.local_computer.File(NODE_INDEX_PATH)
+	if not is_file(file) then return false
+	content = file.get_content
+	if typeof(content).lower != "string" then return false
+	lines = content.replace(char(13), "").split(char(10))
+	if lines.len == 0 or lines[0].trim != NODE_INDEX_HEADER then return false
+	for line in lines[1 : ]
+		parts = line.trim.split("[|]")
+		if parts.len < 2 then continue
+		if parts[0] == "S" then
+			count = parts[1].to_int
+			if typeof(count).lower == "number" and count >= 0 then globals.node_shard_count = count
+		end if
+	end for
+	return true
+end function
+
+
+load_nodes = function
+	globals.nodes = []
+	globals.node_keys = {}
+	load_node_index
+	names = []
+	if globals.node_shard_count > 0 then
+		number = 1
+		while number <= globals.node_shard_count
+			names.push node_shard_name(number)
+			number = number + 1
+		end while
+	else
+		files = globals.node_folder.get_files
+		if typeof(files).lower == "list" then
+			for file in files
+				if file.name.indexOf(NODE_SHARD_PREFIX) == 0 then add_unique(names, file.name)
+			end for
+		end if
+		globals.node_shard_count = names.len
+	end if
+
+	for name in names
+		file = globals.local_computer.File(join_path(NODE_ROOT, name))
+		if not is_file(file) then continue
+		content = file.get_content
+		if typeof(content).lower != "string" then continue
+		for line in content.replace(char(13), "").split(char(10))
+			parts = line.trim.split("[|]")
+			if parts.len < 11 or parts[0] != "N" then continue
+			port = parts[3].to_int
+			if not is_valid_ip(parts[2]) then continue
+			if typeof(port).lower != "number" or port < 1 or port > 65535 then continue
+			node = {
+				"id": parts[1],
+				"ip": parts[2],
+				"port": port,
+				"user": parts[4],
+				"password": parts[5],
+				"lan": parts[6],
+				"verified": parts[7],
+				"computer_clean": parts[8],
+				"router_clean": parts[9],
+				"source": parts[10],
+			}
+			key = node_key(node)
+			if globals.node_keys.hasIndex(key) then continue
+			globals.nodes.push node
+			globals.node_keys[key] = 1
+		end for
+	end for
+	return globals.nodes.len
+end function
+
+
+load_denylist = function
+	globals.deny = {}
+	file = globals.local_computer.File(NODE_DENYLIST_PATH)
+	if not is_file(file) then return 0
+	content = file.get_content
+	if typeof(content).lower != "string" then return 0
+	for line in content.replace(char(13), "").split(char(10))
+		parts = line.trim.split("[|]")
+		if parts.len < 2 or parts[0] != "D" then continue
+		if is_valid_ip(parts[1]) then globals.deny[parts[1]] = 1
+	end for
+	return globals.deny.indexes.len
+end function
+
+
+write_denylist = function
+	file = touch_file(globals.node_folder, "denylist.txt")
+	if not is_file(file) then return false
+	lines = [ NODE_DENY_HEADER ]
+	for ip in globals.deny.indexes
+		lines.push "D|" + ip + "|removed|" + current_date
+	end for
+	return file.set_content(lines.join(char(10))) == 1
+end function
+
+
+node_line = function(node)
+	return "N|" + db_field(node.id) + "|" + db_field(node.ip) + "|" + node.port + "|" + db_field(node.user) + "|" + db_field(node.password) + "|" + db_field(node.lan) + "|" + db_field(node.verified) + "|" + db_field(node.computer_clean) + "|" + db_field(node.router_clean) + "|" + db_field(node.source)
+end function
+
+
+write_node_shard = function(number, lines)
+	file = touch_file(globals.node_folder, node_shard_name(number))
+	if not is_file(file) then return false
+	content = lines.join(char(10))
+	if content.len > NODE_SHARD_LIMIT then return false
+	return file.set_content(content) == 1
+end function
+
+
+save_nodes = function
+	old_count = globals.node_shard_count
+	shard_number = 1
+	lines = [ NODE_SHARD_HEADER ]
+	size = NODE_SHARD_HEADER.len
+	for node in globals.nodes
+		line = node_line(node)
+		if size + line.len + 1 > NODE_SHARD_LIMIT and lines.len > 1 then
+			if not write_node_shard(shard_number, lines) then return false
+			shard_number = shard_number + 1
+			lines = [ NODE_SHARD_HEADER ]
+			size = NODE_SHARD_HEADER.len
+		end if
+		lines.push line
+		size = size + line.len + 1
+	end for
+	if not write_node_shard(shard_number, lines) then return false
+
+	retired = shard_number + 1
+	while retired <= old_count
+		file = globals.local_computer.File(join_path(NODE_ROOT, node_shard_name(retired)))
+		if is_file(file) then file.delete
+		retired = retired + 1
+	end while
+	globals.node_shard_count = shard_number
+
+	index = touch_file(globals.node_folder, "index.txt")
+	if not is_file(index) then return false
+	lines = [
+		NODE_INDEX_HEADER,
+		"S|" + shard_number,
+		"N|" + globals.nodes.len,
+		"D|denylist.txt",
+		"U|" + current_date,
+	]
+	return index.set_content(lines.join(char(10))) == 1
+end function
+
+
+admit_node = function(ip, port, password, lan, computer_clean, router_clean)
+	computer_status = "no"
+	router_status = "no"
+	if computer_clean then computer_status = "yes"
+	if router_clean then router_status = "yes"
+	node = {
+		"id": "node-" + floor(rnd * 100000000),
+		"ip": ip,
+		"port": port,
+		"user": "root",
+		"password": password,
+		"lan": lan,
+		"verified": current_date,
+		"computer_clean": computer_status,
+		"router_clean": router_status,
+		"source": VULN_DB_SOURCE,
+	}
+	if not safe_field(password) then return false
+	key = node_key(node)
+	if globals.node_keys.hasIndex(key) then return true
+	globals.nodes.push node
+	globals.node_keys[key] = 1
+	if not save_nodes then
+		globals.nodes.remove globals.nodes.len - 1
+		globals.node_keys = {}
+		for remaining in globals.nodes
+			globals.node_keys[node_key(remaining)] = 1
+		end for
+		return false
+	end if
+	return true
+end function
+
+
+show_nodes = function
+	autonet_heading("VERIFIED NODES", globals.nodes.len + " STORED")
+	if globals.nodes.len == 0 then
+		print event_line("NODE STORE EMPTY", COLOR_ORANGE, NODE_ROOT, COLOR_PURPLE)
+		return 
+	end if
+	index = 0
+	for node in globals.nodes
+		print paint("◆ NODE ", COLOR_PURPLE) + paint("[" + index + "]", COLOR_PINK) +
+			"  " + paint(node.ip + ":" + node.port, COLOR_CYAN)
+		print event_branch("AUTHORITY", COLOR_PINK, node.user, COLOR_PINK) +
+			"  " + paint("VERIFIED", COLOR_GREEN) + "  " + paint(node.verified, COLOR_GREEN)
+		print paint("  ╰ CLEANUP", COLOR_ORANGE) + "  computer=" +
+			paint(node.computer_clean, cleanup_state_color(node.computer_clean)) +
+			"  |  router=" + paint(node.router_clean, cleanup_state_color(node.router_clean))
+		index = index + 1
+	end for
+end function
+
+
+remove_node = function(index)
+	if typeof(index).lower != "number" then return false
+	if index < 0 or index >= globals.nodes.len then return false
+	node = globals.nodes[index]
+	print event_line("CONFIRM REMOVE", COLOR_RED, "REMOVE " + node.ip, COLOR_RED)
+	print event_branch("EFFECT", COLOR_ORANGE,
+		"remove matching records and deny this IP", COLOR_ORANGE)
+	answer = user_input(autonet_input_signature("REMOVE", "TARGET", node.ip)).trim
+	if answer != "REMOVE " + node.ip then
+		print event_line("REMOVAL CANCELLED", COLOR_ORANGE, node.ip, COLOR_CYAN)
+		return false
+	end if
+	kept = []
+	removed_count = 0
+	for existing in globals.nodes
+		if existing.ip == node.ip then
+			removed_count = removed_count + 1
+		else
+			kept.push existing
+		end if
+	end for
+	globals.nodes = kept
+	globals.node_keys = {}
+	for remaining in globals.nodes
+		globals.node_keys[node_key(remaining)] = 1
+	end for
+	globals.deny[node.ip] = 1
+	if not save_nodes or not write_denylist then
+		print event_line("NODE STORE REFUSED", COLOR_RED, "database rebuild failed", COLOR_RED)
+		return false
+	end if
+	print event_line("NODE REMOVED", COLOR_GREEN, node.ip, COLOR_CYAN)
+	print event_branch("RECORDS", COLOR_GREEN, removed_count, COLOR_PINK) +
+		"  " + paint("DENYLIST", COLOR_ORANGE) + "  " + paint("updated", COLOR_GREEN)
+	return true
+end function
+
+
+root_from_value = function(value)
+	if is_shell(value) then return value.host_computer.File("/")
+	if is_computer(value) then return value.File("/")
+	if is_file(value) then
+		current = value
+		while current.parent
+			current = current.parent
+		end while
+		return current
+	end if
+	return null
+end function
+
+
+computer_from_value = function(value)
+	if is_shell(value) then return value.host_computer
+	if is_computer(value) then return value
+	root = root_from_value(value)
+	if not is_file(root) then return null
+	return null
+end function
+
+
+child_named = function(folder, name)
+	if not is_file(folder) or not folder.is_folder then return null
+	folders = folder.get_folders
+	if typeof(folders).lower == "list" then
+		for child in folders
+			if child.name == name then return child
+		end for
+	end if
+	files = folder.get_files
+	if typeof(files).lower == "list" then
+		for child in files
+			if child.name == name then return child
+		end for
+	end if
+	return null
+end function
+
+
+file_from_root = function(root, path)
+	if not is_file(root) then return null
+	current = root
+	for part in path.split("/")
+		part = part.trim
+		if part == "" then continue
+		current = child_named(current, part)
+		if not is_file(current) then return null
+	end for
+	return current
+end function
+
+
+has_rwx = function(value)
+	if not is_file(value) then return false
+	if not value.has_permission("r") then return false
+	if not value.has_permission("w") then return false
+	return value.has_permission("x")
+end function
+
+
+access_level = function(value)
+	root = root_from_value(value)
+	if not is_file(root) then return "none"
+	root_home = file_from_root(root, "/root")
+	if has_rwx(root_home) then return "root"
+	home = file_from_root(root, "/home")
+	if not is_file(home) then return "guest"
+	folders = home.get_folders
+	if typeof(folders).lower != "list" then return "guest"
+	for folder in folders
+		if folder.name == "guest" then continue
+		if has_rwx(folder) then return "user"
+	end for
+	return "guest"
+end function
+
+
+scrub_source_from_value = function(value)
+	root = root_from_value(value)
+	if not is_file(root) then return null
+	for path in [
+		"/var/silentclean",
+		"/etc/fstab",
+		"/etc/xorg.conf",
+	]
+		candidate = file_from_root(root, path)
+		if not is_file(candidate) then continue
+		if candidate.is_folder or candidate.is_binary then continue
+		if candidate.has_permission("r") then return candidate
+	end for
+	etc = file_from_root(root, "/etc")
+	if not is_file(etc) then return null
+	files = etc.get_files
+	if typeof(files).lower != "list" then return null
+	for candidate in files
+		if candidate.is_folder or candidate.is_binary then continue
+		if candidate.has_permission("r") then return candidate
+	end for
+	return null
+end function
+
+
+stage_clean_source = function(value)
+	root = root_from_value(value)
+	if not is_file(root) then return null
+	log_file = file_from_root(root, "/var/system.log")
+	if not is_file(log_file) or not log_file.has_permission("w") then return null
+	return scrub_source_from_value(value)
+end function
+
+
+clean_source = function(source)
+	if not is_file(source) then return false
+	return source.copy("/var", "system.log") == 1
+end function
+
+
+unsafe_checks = function(provider, meta_lib, region)
+	checks = []
+	scan_text = provider.scan_address(meta_lib, region)
+	if typeof(scan_text).lower != "string" then return checks
+	pieces = scan_text.split("Unsafe check: ")
+	if pieces.len < 2 then return checks
+	for piece in pieces[1 : ]
+		start = piece.indexOf("<b>")
+		finish = piece.indexOf("</b>")
+		if start == null or finish == null then continue
+		if finish <= start + 3 then continue
+		unsafe = piece[start + 3 : finish].replace(char(10), "").trim
+		if unsafe != "" and checks.indexOf(unsafe) == null then checks.push(unsafe)
+	end for
+	return checks
+end function
+
+
+stage_local_router_source = function
+	router = get_router
+	if typeof(router).lower != "router" then return null
+	provider = include_lib("/lib/metaxploit.so")
+	if typeof(provider).lower != "metaxploitlib" then return null
+	session = provider.net_use(router.public_ip, 0)
+	if not is_session(session) then return null
+	meta_lib = session.dump_lib
+	if not is_meta_lib(meta_lib) then return null
+	regions = provider.scan(meta_lib)
+	if typeof(regions).lower != "list" then return null
+	for region in regions
+		for unsafe in unsafe_checks(provider, meta_lib, region)
+			result = meta_lib.overflow(region, unsafe, router.local_ip)
+			source = stage_clean_source(result)
+			if is_file(source) then return source
+			result = meta_lib.overflow(region, unsafe)
+			source = stage_clean_source(result)
+			if is_file(source) then return source
+		end for
+	end for
+	return null
+end function
+
+
+router_helper_mode = function
+	bridge = get_custom_object
+	bridge.an_router_source = null
+	bridge.an_router_status = "running"
+	source = stage_local_router_source
+	if is_file(source) then
+		bridge.an_router_source = source
+		bridge.an_router_status = "ready"
+	else
+		bridge.an_router_status = "unavailable"
+	end if
+	exit
+end function
+
+
+writable_folder = function(shell)
+	if not is_shell(shell) then return null
+	computer = shell.host_computer
+	root = computer.File("/root")
+	if is_file(root) and root.has_permission("w") and root.has_permission("x") then return root
+	homes = computer.File("/home")
+	if not is_file(homes) then return null
+	folders = homes.get_folders
+	if typeof(folders).lower != "list" then return null
+	for folder in folders
+		if folder.has_permission("w") and folder.has_permission("x") then return folder
+	end for
+	return null
+end function
+
+
+deploy_router_helper = function(remote_shell)
+	work = writable_folder(remote_shell)
+	if not is_file(work) then return ""
+	source_file = globals.local_computer.File(program_path)
+	if not is_file(source_file) then return ""
+	if globals.local_shell.scp(program_path, work.path, remote_shell) != 1 then return ""
+	remote_path = join_path(work.path, source_file.name)
+	if not is_file(remote_shell.host_computer.File(remote_path)) then return ""
+	return remote_path
+end function
+
+
+stage_remote_router_source = function(remote_shell)
+	helper_path = deploy_router_helper(remote_shell)
+	if helper_path == "" then return {
+		"source": null,
+		"helper": "",
+	}
+	bridge = get_custom_object
+	bridge.an_router_source = null
+	bridge.an_router_status = "waiting"
+	remote_shell.launch helper_path, "--router-clean-helper"
+	waited = 0
+	while waited < HELPER_WAIT_SECONDS
+		if bridge.an_router_status != "waiting" and bridge.an_router_status != "running" then break
+		wait 0.2
+		waited = waited + 0.2
+	end while
+	source = bridge.an_router_source
+	bridge.an_router_source = null
+	return {
+		"source": source,
+		"helper": helper_path,
+	}
+end function
+
+
+delete_remote_helper = function(remote_shell, helper_path)
+	if not is_shell(remote_shell) or helper_path == "" then return 
+	file = remote_shell.host_computer.File(helper_path)
+	if is_file(file) then file.delete
+end function
+
+
+decipher_root_password = function(value)
+	root = root_from_value(value)
+	if not is_file(root) then return null
+	passwd = file_from_root(root, "/etc/passwd")
+	if not is_file(passwd) or not passwd.has_permission("r") then return null
+	content = passwd.get_content
+	if typeof(content).lower != "string" then return null
+	root_hash = ""
+	for line in content.split(char(10))
+		fields = line.trim.split(":")
+		if fields.len < 2 then continue
+		if fields[0] == "root" then
+			root_hash = fields[1].trim
+			break
+		end if
+	end for
+	if root_hash == "" then return null
+	if root_hash == "ced421b174bd05a560a4f098565d4c7b" then return "madeinRussia"
+	password = globals.crypto.decipher(root_hash)
+	if typeof(password).lower != "string" or password == "" then return null
+	return password
+end function
+
+
+vuln_fingerprint = function(meta_lib)
+	return meta_lib.lib_name + "@" + meta_lib.version
+end function
+
+
+vuln_major = function(version)
+	parts = str(version).split("[.]")
+	if parts.len == 0 then return "unknown"
+	return path_component(parts[0])
+end function
+
+
+vuln_bucket_key_values = function(library, version)
+	return str(library) + "@V" + vuln_major(version)
+end function
+
+
+vuln_mode = function(requirement)
+	lowered = requirement.lower
+	if lowered.indexOf("password") != null then return "password"
+	if lowered.indexOf("lan ip") != null or lowered.indexOf("local ip") != null or lowered.indexOf("same subnet") != null or lowered.indexOf("same network") != null or lowered.indexOf("router membership") != null then return "lan"
+	if lowered.trim == "" then return "plain"
+	return "unknown"
+end function
+
+
+vuln_shard_name = function(number)
+	return VULN_DB_SHARD_PREFIX + pad4(number) + ".txt"
+end function
+
+
+vuln_folder_named = function(name, create = false)
+	path = join_path(VULN_DB_ROOT, name)
+	folder = globals.local_computer.File(path)
+	if is_file(folder) then
+		if folder.is_folder then return folder
+		return null
+	end if
+	if not create then return null
+	return ensure_folder_path(path)
+end function
+
+
+vuln_bucket_folder = function(library, version, create = false)
+	library_folder = vuln_folder_named(path_component(library), create)
+	if not is_file(library_folder) then return null
+	path = join_path(library_folder.path, "V" + vuln_major(version))
+	folder = globals.local_computer.File(path)
+	if is_file(folder) then
+		if folder.is_folder then return folder
+		return null
+	end if
+	if not create then return null
+	return ensure_folder_path(path)
+end function
+
+
+merge_vuln = function(fingerprint, incoming)
+	if not globals.vulns.hasIndex(fingerprint) then globals.vulns[fingerprint] = []
+	for known in globals.vulns[fingerprint]
+		if known.region != incoming.region or known.unsafe != incoming.unsafe or known.mode != incoming.mode then continue
+		if incoming.score > known.score then
+			known.score = incoming.score
+			known.last_kind = incoming.last_kind
+		end if
+		if incoming.hits > known.hits then known.hits = incoming.hits
+		if incoming.attempts > known.attempts then known.attempts = incoming.attempts
+		if known.requirement == "" and incoming.requirement != "" then known.requirement = incoming.requirement
+		return false
+	end for
+	globals.vulns[fingerprint].push incoming
+	return true
+end function
+
+
+remember_fingerprint = function(library, version)
+	fingerprint = library + "@" + version
+	globals.vuln_meta[fingerprint] = [
+		library,
+		version,
+	]
+	if not globals.vulns.hasIndex(fingerprint) then globals.vulns[fingerprint] = []
+	return fingerprint
+end function
+
+
+load_vuln_content = function(content)
+	if typeof(content).lower != "string" then return 0
+	loaded = 0
+	for line in content.replace(char(13), "").split(char(10))
+		parts = line.trim.split("[|]")
+		if parts.len < 3 then continue
+		if parts[0] == "S" then
+			globals.vuln_scanned[parts[1] + "@" + parts[2]] = 1
+			remember_fingerprint parts[1], parts[2]
+			continue
+		end if
+		if parts[0] != "V" or parts.len < 11 then continue
+		score = parts[7].to_int
+		hits = parts[8].to_int
+		attempts = parts[9].to_int
+		if typeof(score).lower != "number" then score = 0
+		if typeof(hits).lower != "number" then hits = 0
+		if typeof(attempts).lower != "number" then attempts = 0
+		source = "-"
+		if parts.len >= 12 then source = parts[11]
+		fingerprint = remember_fingerprint(parts[1], parts[2])
+		incoming = {
+			"lib": parts[1],
+			"version": parts[2],
+			"region": parts[3],
+			"unsafe": parts[4],
+			"mode": parts[5],
+			"requirement": parts[6],
+			"score": score,
+			"hits": hits,
+			"attempts": attempts,
+			"last_kind": parts[10],
+			"source": source,
+		}
+		if merge_vuln(fingerprint, incoming) then loaded = loaded + 1
+	end for
+	return loaded
+end function
+
+
+load_vuln_index = function
+	globals.vuln_index = {}
+	file = globals.local_computer.File(VULN_DB_INDEX_PATH)
+	if not is_file(file) then return "missing"
+	content = file.get_content
+	if typeof(content).lower != "string" then return "unreadable"
+	lines = content.replace(char(13), "").split(char(10))
+	if lines.len == 0 or lines[0].trim != VULN_DB_INDEX_HEADER then return "incompatible"
+	for line in lines[1 : ]
+		parts = line.trim.split("[|]")
+		if parts.len < 7 or parts[0] != "B" then continue
+		count = parts[5].to_int
+		if typeof(count).lower != "number" then count = 0
+		key = parts[1] + "@V" + parts[2]
+		globals.vuln_index[key] = {
+			"lib": parts[1],
+			"major": parts[2],
+			"folder": parts[3],
+			"bucket": parts[4],
+			"count": count,
+			"source": parts[6],
+		}
+	end for
+	return VULN_DB_INDEX_HEADER
+end function
+
+
+load_vuln_bucket = function(meta_lib)
+	bucket_key = vuln_bucket_key_values(meta_lib.lib_name, meta_lib.version)
+	if globals.vuln_loaded_buckets.hasIndex(bucket_key) then return 0
+	globals.vuln_loaded_buckets[bucket_key] = 1
+	folder = vuln_bucket_folder(meta_lib.lib_name, meta_lib.version)
+	if not is_file(folder) then return 0
+	count = 0
+	if globals.vuln_index.hasIndex(bucket_key) then count = globals.vuln_index[bucket_key].count
+	names = []
+	if count > 0 then
+		number = 1
+		while number <= count
+			names.push vuln_shard_name(number)
+			number = number + 1
+		end while
+	else
+		files = folder.get_files
+		if typeof(files).lower == "list" then
+			for file in files
+				if file.name.indexOf(VULN_DB_SHARD_PREFIX) == 0 then add_unique(names, file.name)
+			end for
+		end if
+	end if
+	loaded = 0
+	for name in names
+		file = globals.local_computer.File(join_path(folder.path, name))
+		if is_file(file) then loaded = loaded + load_vuln_content(file.get_content)
+	end for
+	diag "vuln bucket load | bucket=" + bucket_key + " | entries=" + loaded
+	return loaded
+end function
+
+
+mark_vuln_dirty = function(fingerprint)
+	globals.vuln_dirty = true
+	globals.vuln_dirty_fingerprints[fingerprint] = 1
+end function
+
+
+scan_vulnerabilities = function(provider, meta_lib)
+	fingerprint = vuln_fingerprint(meta_lib)
+	load_vuln_bucket meta_lib
+	remember_fingerprint meta_lib.lib_name, str(meta_lib.version)
+	if globals.vuln_scanned.hasIndex(fingerprint) then return globals.vulns[fingerprint]
+	if not LEARN_UNKNOWN_LIBRARIES then return globals.vulns[fingerprint]
+
+	regions = provider.scan(meta_lib)
+	if typeof(regions).lower != "list" then return globals.vulns[fingerprint]
+	for region in regions
+		scan_text = provider.scan_address(meta_lib, region)
+		if typeof(scan_text).lower != "string" then continue
+		pieces = scan_text.split("Unsafe check: ")
+		if pieces.len < 2 then continue
+		for piece in pieces[1 : ]
+			start = piece.indexOf("<b>")
+			finish = piece.indexOf("</b>")
+			if start == null or finish == null or finish <= start + 3 then continue
+			unsafe = piece[start + 3 : finish].replace(char(10), "").trim
+			if unsafe == "" then continue
+			requirement = piece[finish + 4 : ].replace("<b>", "").replace("</b>", "")
+			requirement = requirement.replace("<color=red>", "").replace("</color>", "")
+			requirement = requirement.replace(char(10), " ").trim
+			while requirement.indexOf("  ") != null
+				requirement = requirement.replace("  ", " ")
+			end while
+			incoming = {
+				"lib": meta_lib.lib_name,
+				"version": str(meta_lib.version),
+				"region": region,
+				"unsafe": unsafe,
+				"mode": vuln_mode(requirement),
+				"requirement": requirement,
+				"score": 0,
+				"hits": 0,
+				"attempts": 0,
+				"last_kind": "untried",
+				"source": VULN_DB_SOURCE,
+			}
+			merge_vuln fingerprint, incoming
+		end for
+	end for
+	globals.vuln_scanned[fingerprint] = 1
+	mark_vuln_dirty fingerprint
+	diag "vuln scan | library=" + fingerprint + " | entries=" + globals.vulns[fingerprint].len
+	return globals.vulns[fingerprint]
+end function
+
+
+ordered_vulns = function(entries)
+	ordered = []
+	for floor_score in [
+		90,
+		70,
+		50,
+		1,
+		-1000,
+	]
+		for entry in entries
+			if floor_score == 90 and entry.score >= 90 then ordered.push(entry)
+			if floor_score == 70 and entry.score >= 70 and entry.score < 90 then ordered.push(entry)
+			if floor_score == 50 and entry.score >= 50 and entry.score < 70 then ordered.push(entry)
+			if floor_score == 1 and entry.score > 0 and entry.score < 50 then ordered.push(entry)
+			if floor_score == -1000 and entry.score <= 0 then ordered.push(entry)
+		end for
+	end for
+	return ordered
+end function
+
+
+requirement_ready = function(entry, session)
+	if entry.mode == "lan" then return false
+	lowered = entry.requirement.lower
+	if lowered.indexOf("root active") != null or lowered.indexOf("active root") != null then
+		if not session.is_root_active_user then return false
+	end if
+	if lowered.indexOf("active user") != null then
+		if not session.is_any_active_user then return false
+	end if
+	return true
+end function
+
+
+record_vuln_result = function(entry, result)
+	entry.attempts = entry.attempts + 1
+	kind = typeof(result).lower
+	entry.last_kind = kind
+	level = access_level(result)
+	score = 0
+	if is_exploit_object(result) then entry.hits = entry.hits + 1
+	if level == "root" then
+		score = 100
+	else if level == "user" then
+		score = 70
+	else if kind == "shell" then
+		score = 50
+	else if kind == "file" then
+		score = 30
+	else if kind == "computer" then
+		score = 35
+	else if kind == "number" then
+		score = 10
+	end if
+	if score > entry.score then entry.score = score
+	mark_vuln_dirty entry.lib + "@" + entry.version
+end function
+
+
+vuln_line = function(entry)
+	source = VULN_DB_SOURCE
+	if entry.source != "" and entry.source != "-" then source = entry.source
+	return "V|" + db_field(entry.lib) + "|" + db_field(entry.version) + "|" + db_field(entry.region) + "|" + db_field(entry.unsafe) + "|" + db_field(entry.mode) + "|" + db_field(entry.requirement) + "|" + entry.score + "|" + entry.hits + "|" + entry.attempts + "|" + db_field(entry.last_kind) + "|" + db_field(source)
+end function
+
+
+write_vuln_bucket = function(bucket_key)
+	bucket_parts = bucket_key.split("@V")
+	if bucket_parts.len < 2 then return null
+	library = bucket_parts[0]
+	major = bucket_parts[1]
+	folder = vuln_bucket_folder(library, major + ".0.0", true)
+	if not is_file(folder) then return null
+
+	old_count = 0
+	if globals.vuln_index.hasIndex(bucket_key) then old_count = globals.vuln_index[bucket_key].count
+	number = 1
+	lines = [ "ACVDB3" ]
+	size = 7
+	for fingerprint in globals.vuln_meta.indexes
+		meta = globals.vuln_meta[fingerprint]
+		if vuln_bucket_key_values(meta[0], meta[1]) != bucket_key then continue
+		scan_line = "S|" + db_field(meta[0]) + "|" + db_field(meta[1])
+		if size + scan_line.len + 1 > VULN_DB_SHARD_LIMIT and lines.len > 1 then
+			file = touch_file(folder, vuln_shard_name(number))
+			if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return null
+			number = number + 1
+			lines = [ "ACVDB3" ]
+			size = 7
+		end if
+		lines.push scan_line
+		size = size + scan_line.len + 1
+		if globals.vulns.hasIndex(fingerprint) then
+			for entry in globals.vulns[fingerprint]
+				line = vuln_line(entry)
+				if size + line.len + 1 > VULN_DB_SHARD_LIMIT and lines.len > 1 then
+					file = touch_file(folder, vuln_shard_name(number))
+					if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return null
+					number = number + 1
+					lines = [
+						"ACVDB3",
+						scan_line,
+					]
+					size = 7 + scan_line.len + 1
+				end if
+				lines.push line
+				size = size + line.len + 1
+			end for
+		end if
+	end for
+	file = touch_file(folder, vuln_shard_name(number))
+	if not is_file(file) or file.set_content(lines.join(char(10))) != 1 then return null
+	retired = number + 1
+	while retired <= old_count
+		old_file = globals.local_computer.File(join_path(folder.path, vuln_shard_name(retired)))
+		if is_file(old_file) then old_file.delete
+		retired = retired + 1
+	end while
+	globals.vuln_index[bucket_key] = {
+		"lib": library,
+		"major": major,
+		"folder": path_component(library),
+		"bucket": "V" + major,
+		"count": number,
+		"source": VULN_DB_SOURCE,
+	}
+	return number
+end function
+
+
+save_vulns = function
+	if not globals.vuln_dirty then return true
+	dirty_buckets = {}
+	for fingerprint in globals.vuln_dirty_fingerprints.indexes
+		if not globals.vuln_meta.hasIndex(fingerprint) then continue
+		meta = globals.vuln_meta[fingerprint]
+		dirty_buckets[vuln_bucket_key_values(meta[0], meta[1])] = 1
+	end for
+	for bucket_key in dirty_buckets.indexes
+		if typeof(write_vuln_bucket(bucket_key)).lower != "number" then return false
+	end for
+	index = touch_file(globals.vuln_folder, "index.txt")
+	if not is_file(index) then return false
+	lines = [ VULN_DB_INDEX_HEADER ]
+	for bucket_key in globals.vuln_index.indexes
+		entry = globals.vuln_index[bucket_key]
+		lines.push "B|" + db_field(entry.lib) + "|" + db_field(entry.major) + "|" + db_field(entry.folder) + "|" + db_field(entry.bucket) + "|" + entry.count + "|" + db_field(entry.source)
+	end for
+	if index.set_content(lines.join(char(10))) != 1 then return false
+	globals.vuln_dirty = false
+	globals.vuln_dirty_fingerprints = {}
+	diag "vuln db save complete | buckets=" + dirty_buckets.indexes.len
+	return true
+end function
+
+
+init_vulns = function
+	globals.vulns = {}
+	globals.vuln_meta = {}
+	globals.vuln_scanned = {}
+	globals.vuln_loaded_buckets = {}
+	globals.vuln_dirty = false
+	globals.vuln_dirty_fingerprints = {}
+	state = load_vuln_index
+	if state != VULN_DB_INDEX_HEADER then
+		index = touch_file(globals.vuln_folder, "index.txt")
+		if is_file(index) then index.set_content(VULN_DB_INDEX_HEADER)
+	end if
+	diag "vuln db ready | schema=" + VULN_DB_INDEX_HEADER + " | state=" + state
+end function
+
+
+random_public_ip = function
+	while true
+		ip = floor((rnd * 223) + 1) + "." + floor(rnd * 256) + "." + floor(rnd * 256) + "." + floor((rnd * 254) + 1)
+		if not is_valid_ip(ip) then continue
+		if is_lan_ip(ip) then continue
+		if ip == globals.local_computer.public_ip then continue
+		return ip
+	end while
+end function
+
+
+find_ssh_endpoint = function(ip)
+	router = get_router(ip)
+	if typeof(router).lower != "router" then return null
+	ports = router.used_ports
+	if typeof(ports).lower != "list" then return null
+	fallback = null
+	for port_object in ports
+		info = router.port_info(port_object)
+		if typeof(info).lower != "string" then continue
+		if info.lower.indexOf("ssh") == null then continue
+		endpoint = {
+			"ip": ip,
+			"port": port_object.port_number,
+			"info": info,
+		}
+		if port_object.port_number == 22 then return endpoint
+		if fallback == null then fallback = endpoint
+	end for
+	return fallback
+end function
+
+
+root_shell_valid = function(shell, ip)
+	if not is_shell(shell) then return false
+	computer = shell.host_computer
+	if not is_computer(computer) then return false
+	if computer.public_ip != ip then return false
+	return access_level(shell) == "root"
+end function
+
+
+connect_root = function(ip, port, password)
+	if typeof(password).lower != "string" or password == "" then return null
+	shell = globals.local_shell.connect_service(
+		ip,
+		port,
+		"root",
+		password,
+		"ssh")
+	if not root_shell_valid(shell, ip) then return null
+	return shell
+end function
+
+
+attack_ssh = function(endpoint)
+	result = {
+		"shell": null,
+		"password": "",
+		"results": [],
+		"risk": false,
+		"fingerprint": "",
+		"reason": "access exhausted",
+	}
+	session = globals.metaxploit.net_use(endpoint.ip, endpoint.port)
+	if not is_session(session) then
+		result.reason = "net_use failed"
+		return result
+	end if
+	meta_lib = session.dump_lib
+	if not is_meta_lib(meta_lib) then
+		result.reason = "service library unavailable"
+		return result
+	end if
+	result.fingerprint = vuln_fingerprint(meta_lib)
+	entries = scan_vulnerabilities(globals.metaxploit, meta_lib)
+	diag "vuln use | host=" + endpoint.ip + ":" + endpoint.port + " | library=" + result.fingerprint + " | entries=" + entries.len
+	if entries.len == 0 then
+		result.reason = "no vulnerability entries"
+		return result
+	end if
+
+	password_candidates = []
+	object_results = []
+	attempts = 0
+	for entry in ordered_vulns(entries)
+		if attempts >= MAX_RESULTS_PER_SERVICE then break
+		if not requirement_ready(entry, session) then continue
+		arguments = []
+		if entry.mode == "password" then arguments = [ ROOT_PASSWORD_INJECT ]
+		if entry.mode == "plain" then arguments = [ "__AN_PLAIN__" ]
+		if entry.mode == "unknown" then arguments = [
+			ROOT_PASSWORD_INJECT,
+			"__AN_PLAIN__",
+		]
+		for argument in arguments
+			attempts = attempts + 1
+			result.risk = true
+			show_attack_event(entry, attack_technique(argument, entry))
+			if argument == "__AN_PLAIN__" then
+				overflow = meta_lib.overflow(entry.region, entry.unsafe)
+			else
+				overflow = meta_lib.overflow(entry.region, entry.unsafe, argument)
+			end if
+			record_vuln_result entry, overflow
+			show_attack_result overflow
+			if overflow != null then
+				diag_value("overflow cached " + entry.region + " mode=" + entry.mode, overflow)
+			end if
+			if typeof(overflow).lower == "number" then add_unique(password_candidates, ROOT_PASSWORD_INJECT)
+			if is_exploit_object(overflow) then
+				object_results.push overflow
+				password = decipher_root_password(overflow)
+				if typeof(password).lower == "string" then add_unique(password_candidates, password)
+				if entry.mode == "unknown" then
+					if argument == "__AN_PLAIN__" then entry.mode = "plain" else entry.mode = "password"
+				end if
+			end if
+			if object_results.len >= MAX_RESULTS_PER_SERVICE then break
+		end for
+	end for
+	result.results = object_results
+	for password in password_candidates
+		root_shell = connect_root(endpoint.ip, endpoint.port, password)
+		if is_shell(root_shell) then
+			result.shell = root_shell
+			result.password = password
+			result.reason = "root ssh verified"
+			print paint("◆ ACCESS RETAINED", COLOR_GREEN) + "  " +
+				paint(endpoint.ip + ":" + endpoint.port, COLOR_CYAN) +
+				"  authority=" + paint("root", COLOR_PINK)
+			return result
+		end if
+	end for
+	result.reason = "reusable root ssh not proven"
+	return result
+end function
+
+
+known_ip = function(ip)
+	for node in globals.nodes
+		if node.ip == ip then return true
+	end for
+	return false
+end function
+
+
+clean_execution_route = function
+	computer_ok = clean_source(globals.execution_computer_source)
+	router_ok = clean_source(globals.execution_router_source)
+	if computer_ok and router_ok then
+		diag "execution logs clean | computer=yes | router=yes"
+		return true
+	end if
+	diag "execution log cleanup failed | computer=" + computer_ok + " | router=" + router_ok
+	return false
+end function
+
+
+prepare_execution_cleanup = function
+	globals.execution_computer_source = stage_clean_source(globals.local_shell)
+	globals.execution_router_source = stage_local_router_source
+	computer_ready = is_file(globals.execution_computer_source)
+	router_ready = is_file(globals.execution_router_source)
+	diag "execution cleanup staged | host=" + globals.local_computer.public_ip + "/" + globals.local_computer.local_ip + " | computer=" + computer_ready + " | router=" + router_ready
+	if not computer_ready then return false
+	if REQUIRE_EXECUTION_ROUTER_CLEAN and not router_ready then return false
+	return true
+end function
+
+
+finish_candidate = function(endpoint, attack)
+	save_vulns
+	root_shell = attack.shell
+	if not is_shell(root_shell) then
+		attack.results = []
+		wait FINALIZER_WAIT_SECONDS
+		clean_execution_route
+		if attack.risk then
+			diag "candidate rejected with residual target risk | host=" + endpoint.ip + ":" + endpoint.port + " | reason=" + attack.reason
+		else
+			diag "candidate rejected | host=" + endpoint.ip + ":" + endpoint.port + " | reason=" + attack.reason
+		end if
+		return false
+	end if
+
+	computer_source = stage_clean_source(root_shell)
+	router_stage = stage_remote_router_source(root_shell)
+	router_source = router_stage.source
+	helper_path = router_stage.helper
+	delete_remote_helper root_shell, helper_path
+	target_lan = root_shell.host_computer.local_ip
+	password = attack.password
+
+	computer_ready = is_file(computer_source)
+	router_ready = is_file(router_source)
+	diag "target cleanup staged | host=" + endpoint.ip + "/" + target_lan + " | computer=" + computer_ready + " | router=" + router_ready
+
+	attack.results = []
+	attack.shell = null
+	root_shell = null
+	helper_path = ""
+	wait FINALIZER_WAIT_SECONDS
+
+	computer_ok = clean_source(computer_source)
+	router_ok = clean_source(router_source)
+	target_ok = computer_ok
+	if REQUIRE_TARGET_ROUTER_CLEAN then target_ok = target_ok and router_ok
+	diag "target cleanup complete | host=" + endpoint.ip + "/" + target_lan + " | computer=" + computer_ok + " | router=" + router_ok
+	if computer_ok and not router_ok and not REQUIRE_TARGET_ROUTER_CLEAN then
+		diag "target router cleanup unavailable | host=" + endpoint.ip + "/" + target_lan + " | policy=best-effort | chain_break=execution-route"
+	end if
+
+	flush_log
+	execution_ok = clean_execution_route
+
+	admitted = false
+	if target_ok and execution_ok then
+		admitted = admit_node(
+			endpoint.ip,
+			endpoint.port,
+			password,
+			target_lan,
+			computer_ok,
+			router_ok)
+		if admitted then
+			diag "node admitted | host=" + endpoint.ip + ":" + endpoint.port + " | user=root | password=stored-masked | target_computer=" + computer_ok + " | target_router=" + router_ok
+		else
+			diag "node admission failed | host=" + endpoint.ip + ":" + endpoint.port
+		end if
+	else
+		diag "node rejected | host=" + endpoint.ip + ":" + endpoint.port + " | reason=cleanup gate | target=" + target_ok + " | execution=" + execution_ok
+	end if
+	flush_log
+	clean_execution_route
+	return admitted
+end function
+
+
+parse_bound = function(value, fallback, maximum)
+	if typeof(value).lower != "string" then return fallback
+	number = value.trim.to_int
+	if typeof(number).lower != "number" then return fallback
+	if number < 1 then return fallback
+	if number > maximum then return maximum
+	return number
+end function
+
+
+hunt = function(goal, budget)
+	autonet_heading("NODE HUNT", goal + " VERIFIED NODES")
+	print event_line("GOAL", COLOR_GREEN, goal, COLOR_PINK) + "  " +
+		paint("CANDIDATE BUDGET", COLOR_PURPLE) + "  " + paint(budget, COLOR_PINK)
+	print event_line("NODE STORE", COLOR_PURPLE, NODE_ROOT, COLOR_PURPLE)
+	print event_line("SHARED ACVDB3", COLOR_PURPLE, VULN_DB_ROOT, COLOR_PURPLE)
+	if LEARN_UNKNOWN_LIBRARIES then
+		print event_line("LEARNING MODE", COLOR_GREEN,
+			"unknown SSH libraries will be scanned", COLOR_ORANGE)
+	end if
+
+	if not prepare_execution_cleanup then
+		flush_log
+		return {
+			"verified": 0,
+			"attempted": 0,
+			"ssh": 0,
+			"exploited": 0,
+			"skipped": 0,
+			"reason": "execution cleanup unavailable",
+		}
+	end if
+	clean_execution_route
+
+	verified = 0
+	candidates = 0
+	ssh_found = 0
+	exploited = 0
+	skipped = 0
+	while candidates < budget and verified < goal
+		ip = random_public_ip
+		if globals.deny.hasIndex(ip) or known_ip(ip) then
+			skipped = skipped + 1
+			continue
+		end if
+		candidates = candidates + 1
+		if candidates == 1 or candidates % 25 == 0 then
+			print paint("◆ HUNT PROGRESS", COLOR_PURPLE) + "  " +
+				paint(candidates, COLOR_PINK) + paint("/" + budget, COLOR_DIM)
+			print event_branch("VERIFIED", COLOR_GREEN, verified, COLOR_PINK) + "  " +
+				paint("SSH", COLOR_CYAN) + "  " + paint(ssh_found, COLOR_PINK)
+		end if
+
+		endpoint = find_ssh_endpoint(ip)
+		if typeof(endpoint).lower != "map" then continue
+		ssh_found = ssh_found + 1
+		diag "ssh candidate | host=" + endpoint.ip + ":" + endpoint.port + " | service=" + endpoint.info
+		attack = attack_ssh(endpoint)
+		if attack.risk then exploited = exploited + 1
+		if finish_candidate(endpoint, attack) then
+			verified = verified + 1
+			print paint("◆ NODE ADMITTED ", COLOR_GREEN) +
+				paint("[" + verified + "/" + goal + "]", COLOR_PINK) + "  " +
+				paint(endpoint.ip + ":" + endpoint.port, COLOR_CYAN)
+		end if
+	end while
+	save_vulns
+	flush_log
+	clean_execution_route
+	return {
+		"verified": verified,
+		"attempted": candidates,
+		"ssh": ssh_found,
+		"exploited": exploited,
+		"skipped": skipped,
+		"reason": "complete",
+	}
+end function
+
+
+show_help = function
+	show_autonet_help
+end function
+
+
+if params.len > 0 and params[0] == "--router-clean-helper" then router_helper_mode
+
+globals.local_shell = get_shell
+globals.local_computer = globals.local_shell.host_computer
+globals.metaxploit = include_lib("/lib/metaxploit.so")
+globals.crypto = include_lib("/lib/crypto.so")
+globals.execution_computer_source = null
+globals.execution_router_source = null
+globals.visual_attack_index = 0
+
+if not is_shell(globals.local_shell) then exit(fatal_line("AutoNet requires a local shell."))
+show_autonet_circuit
+if typeof(globals.metaxploit).lower != "metaxploitlib" then
+	exit(fatal_line("Missing or incompatible /lib/metaxploit.so."))
+end if
+if typeof(globals.crypto).lower != "cryptolib" then
+	exit(fatal_line("Missing or incompatible /lib/crypto.so."))
+end if
+if not init_storage then exit(fatal_line("Could not create /root/autoscripts/autonet."))
+init_log
+load_nodes
+load_denylist
+init_vulns
+diag "startup | host=" + globals.local_computer.public_ip + "/" + globals.local_computer.local_ip + " | nodes=" + globals.nodes.len + " | denied=" + globals.deny.indexes.len
+
+print event_line("NODE STORE READY", COLOR_GREEN, NODE_ROOT, COLOR_PURPLE)
+print event_line("SHARED ACVDB3", COLOR_PURPLE, VULN_DB_ROOT, COLOR_PURPLE)
+print event_line("DIAGNOSTIC LOG", COLOR_PURPLE, join_path(LOG_ROOT, "latest.txt"), COLOR_ORANGE)
+
+entered_pin = user_input(autonet_pin_signature, 1)
+if PIN != "" then
+	if entered_pin != PIN then exit(fatal_line("Incorrect PIN."))
+end if
+
+show_autonet_help
+
+command = "hunt"
+if params.len > 0 then command = params[0].lower
+
+if command == "help" or command == "--help" or command == "-h" then
+	flush_log
+	exit
+end if
+
+if command == "nodes" or command == "list" then
+	show_nodes
+	flush_log
+	exit
+end if
+
+if command == "remove" then
+	show_nodes
+	if globals.nodes.len == 0 then exit
+	if params.len > 1 then
+		index = params[1].to_int
+	else
+		print event_line("SELECT NODE", COLOR_PURPLE, "index", COLOR_PINK)
+		index = user_input(autonet_input_signature("REMOVE", "SELECT", "NODE INDEX", COLOR_PINK)).trim.to_int
+	end if
+	if not remove_node(index) then print(event_line("NO NODE REMOVED", COLOR_RED, "selection unchanged", COLOR_ORANGE))
+	flush_log
+	exit
+end if
+
+if command == "deny" then
+	if params.len < 2 or not is_valid_ip(params[1]) then
+		exit(fatal_line("Usage: autonet deny <ip>"))
+	end if
+	globals.deny[params[1]] = 1
+	if write_denylist then
+		print event_line("IP DENIED", COLOR_GREEN, params[1], COLOR_CYAN)
+		print event_branch("DENYLIST", COLOR_ORANGE, "updated", COLOR_GREEN)
+	else
+		print event_line("DENYLIST REFUSED", COLOR_RED, "write failed", COLOR_RED)
+	end if
+	flush_log
+	exit
+end if
+
+if command != "hunt" then
+	exit(fatal_line("Unknown command: " + command))
+end if
+
+if params.len > 1 then
+	goal = parse_bound(params[1], DEFAULT_GOAL, MAX_GOAL)
+else
+	print event_line("HUNT GOAL", COLOR_PURPLE,
+		"1-" + MAX_GOAL + " / default " + DEFAULT_GOAL, COLOR_PINK)
+	goal = parse_bound(user_input(autonet_input_signature(
+		"HUNT SETUP", "GOAL", "VERIFIED NODES", COLOR_PINK)), DEFAULT_GOAL, MAX_GOAL)
+end if
+if params.len > 2 then
+	budget = parse_bound(params[2], DEFAULT_BUDGET, MAX_BUDGET)
+else
+	print event_line("CANDIDATE BUDGET", COLOR_PURPLE,
+		"1-" + MAX_BUDGET + " / default " + DEFAULT_BUDGET, COLOR_PINK)
+	budget = parse_bound(user_input(autonet_input_signature(
+		"HUNT SETUP", "BUDGET", "RANDOM CANDIDATES", COLOR_PINK)), DEFAULT_BUDGET, MAX_BUDGET)
+end if
+
+summary = hunt(goal, budget)
+autonet_heading("AUTONET RESULTS", summary.attempted + " CANDIDATES")
+print event_line("VERIFIED NODES", COLOR_GREEN,
+	summary.verified + "/" + goal, COLOR_PINK)
+print event_line("RANDOM CANDIDATES", COLOR_PURPLE,
+	summary.attempted + "/" + budget, COLOR_PINK)
+print event_line("SSH SERVICES FOUND", COLOR_CYAN, summary.ssh, COLOR_PINK)
+print event_line("EXPLOIT SURFACES USED", COLOR_PURPLE, summary.exploited, COLOR_PINK)
+print event_line("KNOWN / DENIED SKIPS", COLOR_ORANGE, summary.skipped, COLOR_ORANGE)
+print event_line("STORED NODES TOTAL", COLOR_GREEN, globals.nodes.len, COLOR_PINK)
+print event_line("LATEST DIAGNOSTIC LOG", COLOR_PURPLE,
+	join_path(LOG_ROOT, "latest.txt"), COLOR_ORANGE)
+flush_log
